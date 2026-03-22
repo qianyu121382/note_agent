@@ -1,5 +1,5 @@
 """
-定义并管理 Agent 的交互式会话循环。
+定义并管理 Agent 的两种运行模式：交互式会话和单次文件输入。
 """
 import asyncio
 import json
@@ -9,67 +9,72 @@ from agent import ui
 from agent.utils.logging import logger
 
 
-async def run_interactive_session():
+async def run_from_file():
     """
-    运行一个交互式的Agent会话，处理用户的循环输入。
-    程序启动时会尝试读取 inputs.json 作为初始输入，处理完毕后进入交互模式。
+    从 data/inputs.json 文件读取输入，执行一次图处理，然后退出。
+    主要用于开发和调试。
     """
     ui.display_welcome_message()
 
-    # --- NEW LOGIC: Process initial input from inputs.json ---
-    initial_input_processed = False
-    inputs_file_path = Path(__file__).parent.parent.parent / "inputs.json"
-    if inputs_file_path.exists():
-        logger.info(f"Attempting to load initial input from {inputs_file_path}")
-        try:
-            with open(inputs_file_path, 'r', encoding='utf-8') as f:
-                initial_inputs = json.load(f)
-            
-            initial_user_input = initial_inputs.get("user_input", "")
-            
-            if initial_user_input:
-                logger.info("Processing initial input from inputs.json...")
-                ui.display_user_prompt_echo(initial_user_input) # Echo the input from file
+    inputs_file_path = Path(__file__).parent.parent.parent / "data" / "inputs.json"
+    if not inputs_file_path.exists():
+        logger.error(f"Input file not found at: {inputs_file_path}")
+        ui.display_error(f"输入文件未找到: {inputs_file_path}")
+        return
 
-                # Invoke the graph with the initial inputs (which can include user_input and user_preferences)
-                final_state = await graph.ainvoke(initial_inputs)
+    logger.info(f"Loading single input from {inputs_file_path}")
+    try:
+        with open(inputs_file_path, 'r', encoding='utf-8') as f:
+            initial_inputs = json.load(f)
+        
+        user_input = initial_inputs.get("user_input", "")
+        
+        if not user_input:
+            logger.warning("inputs.json found but 'user_input' field is empty. Exiting.")
+            ui.display_error("inputs.json 文件中 'user_input' 字段为空。")
+            return
 
-                intent = final_state.get("intent")
-                if intent == 'note_taking':
-                    final_note = final_state.get("final_note", "")
-                    ui.display_note_processed(final_note)
-                elif intent == 'waiting':
-                    response = final_state.get("response_to_user") or "输入不合规，无法处理。"
-                    ui.display_agent_feedback(response)
-                
-                print("-" * 30) # Separator after initial run
-                initial_input_processed = True
-            else:
-                logger.warning("inputs.json found but 'user_input' field is empty.")
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            logger.error(f"Failed to load or parse inputs.json: {e}", exc_info=True)
-            ui.display_error(f"加载或解析 inputs.json 文件失败: {e}")
-        except Exception as e:
-            logger.error(f"An unexpected error occurred during initial inputs.json processing: {e}", exc_info=True)
-            ui.display_error(f"处理 initial inputs.json 时发生意外错误: {e}")
+        logger.info("Processing input from inputs.json...")
+        ui.display_user_prompt_echo(user_input)
 
-    if not initial_input_processed:
-        logger.info("No valid initial input from inputs.json, starting interactive loop directly.")
-        # If no initial input was processed, print separator to make it clear we're entering interactive mode.
-        print("-" * 30) 
-    # --- END NEW LOGIC ---
+        # 调用图处理
+        final_state = await graph.ainvoke(initial_inputs)
 
-    # Existing interactive loop
+        # 根据意图显示结果
+        intent = final_state.get("intent")
+        if intent == 'note_taking':
+            final_note = final_state.get("final_note", "")
+            ui.display_note_processed(final_note)
+        elif intent == 'waiting':
+            response = final_state.get("response_to_user") or "输入不合规，无法处理。"
+            ui.display_agent_feedback(response)
+        
+        logger.info("Single file run complete. Exiting.")
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse inputs.json: {e}", exc_info=True)
+        ui.display_error(f"解析 inputs.json 文件失败: {e}")
+    except Exception as e:
+        logger.error(f"An unexpected error occurred during file processing: {e}", exc_info=True)
+        ui.display_error(f"处理 inputs.json 时发生意外错误: {e}")
+
+
+async def run_interactive_session():
+    """
+    运行一个交互式的Agent会话，处理用户的循环输入。
+    """
+    ui.display_welcome_message()
+    print("-" * 30) 
+
     while True:
         try:
             user_input = ui.prompt_for_input()
-            ui.display_user_prompt_echo(user_input) # Echo the interactive input
+            ui.display_user_prompt_echo(user_input)
 
             if not user_input.strip():
                 continue
 
-            # Invoke the graph with the interactive user input
-            # (user_preferences are not gathered interactively in this simplified version)
+            # 调用图处理
             final_state = await graph.ainvoke({"user_input": user_input})
 
             intent = final_state.get("intent")

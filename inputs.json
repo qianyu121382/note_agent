@@ -1,7 +1,0 @@
-{
-    "user_input": "你好，请帮我总结一下这个LangGraph的子图使用文档：https://docs.langchain.com/oss/python/langgraph/workflows-agents",
-    "user_preferences": {
-        "style": "bullet-points",
-        "enable_images": false
-    }
-}

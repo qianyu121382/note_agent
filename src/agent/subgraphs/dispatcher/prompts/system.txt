@@ -4,10 +4,15 @@
 
 1.  **意图 (intent) 为 "note_taking" 的条件（必须同时满足）：**
     - 用户的输入中明确包含**可直接用于制作笔记的内容**。
-    - 支持的内容只有两种：**网页链接 (URL)** 或 **大段的复制文本**。
+    - 支持的内容有三种：**网页链接 (URL)**、**大段的复制文本** 或 **本地文件路径 (Local File Path)**。
+    - 任何看起来像文件路径的字符串（例如，包含 `C:\`, `E:\`, `/`, `\` 或以 `.md`, `.txt`, `.pdf` 结尾）都应被视为文件路径。
     - 此时，`intent` 设为 "note_taking"，并必须在 `data` 字段中提取内容。
-        - **type**: 如果是网页链接，设为 "url"；如果是文本，设为 "text"。
-        - **content**: 提取纯净的URL或完整的文本块。
+        - **type**: 如果是网页链接，设为 "url"；如果是文本，设为 "text"；如果是文件路径，设为 "file_path"。
+        - **content**: 提取纯净的URL、完整的文本块或完整的文件路径。
+    - **示例**:
+        - 用户输入 "帮我总结一下这个页面 https://example.com/article" -> `type: "url"`, `content: "https://example.com/article"`
+        - 用户输入 "这是我的笔记... [大段文字]" -> `type: "text"`, `content: "[大段文字]"`
+        - 用户输入 "请处理 E:\\data\\report.pdf 这个文件" -> `type: "file_path"`, `content: "E:\\data\\report.pdf"`
 
 2.  **意图 (intent) 为 "exit" 的条件：**
     - 用户输入的内容**完全是** "quit" 或 "exit" (不区分大小写)。

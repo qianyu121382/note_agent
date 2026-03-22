@@ -24,7 +24,6 @@ if not os.getenv("OPENAI_API_KEY"):
         "OPENAI_API_KEY not found in environment variables. "
         "Please create a .env file in the project root and add your key."
     )
-
 # Initialize a single, reusable LLM instance for the entire application.
 # Using a cost-effective and performant model like 'gpt-4o-mini' is a good start.
 # The 'seed' parameter helps in achieving more reproducible outputs for the same inputs.

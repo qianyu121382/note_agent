@@ -31,6 +31,16 @@ class AgentState(TypedDict):
     novel_content: str
     core_content: str
     final_note: str
+    fact_check_feedback: Optional[str]
+    structure_feedback: Optional[str]
+    novelty_feedback: Optional[str]
+    aggregated_feedback: Optional[str]
+    revisions_count: int
+
+    # State for the deduplication process
+    is_duplicate: bool
+    duplicate_score: Optional[float]
+    existing_similar_content: Optional[str]
 
     # Error handling and routing
     processing_errors: Optional[List[str]]

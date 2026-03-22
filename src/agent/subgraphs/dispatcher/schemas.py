@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 class ExtractedData(BaseModel):
     """定义从用户输入中提取的数据结构。"""
-    type: Literal["url", "text"] = Field(description="提取的数据类型，只能是 'url' 或 'text'")
+    type: Literal["url", "text", "file_path"] = Field(description="提取的数据类型，只能是 'url', 'text', 或 'file_path'")
     content: str = Field(description="提取出的纯净内容（URL链接或文本）")
 
 
