@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Note Agent - Graph Execution</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 2rem;
+            background-color: #f8f9fa;
+            color: #212529;
+            display: flex;
+            justify-content: center;
+        }
+
+        .main-container {
+            display: flex;
+            gap: 2rem;
+            width: 100%;
+            max-width: 1200px;
+        }
+
+        .chat-container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background-color: #ffffff;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+            height: 85vh;
+        }
+        
+        .pipeline-container {
+            flex: 1;
+        }
+
+        h1 {
+            text-align: center;
+            margin: 1.5rem 0;
+            font-weight: 600;
+            font-size: 1.5rem;
+        }
+        
+        /* Chat History */
+        .chat-history {
+            flex-grow: 1;
+            padding: 1rem;
+            overflow-y: auto;
+        }
+        .message {
+            margin-bottom: 1rem;
+            display: flex;
+        }
+        .message.user .message-bubble {
+            background-color: #007bff;
+            color: white;
+            border-bottom-right-radius: 0;
+            margin-left: auto;
+        }
+        .message.bot .message-bubble {
+            background-color: #e9ecef;
+            color: #343a40;
+            border-bottom-left-radius: 0;
+            margin-right: auto;
+        }
+        .message-bubble {
+            padding: 0.75rem 1rem;
+            border-radius: 1rem;
+            max-width: 80%;
+        }
+
+        /* Chat Input */
+        .chat-input-form {
+            display: flex;
+            padding: 1rem;
+            border-top: 1px solid #e9ecef;
+        }
+        #chat-input {
+            flex-grow: 1;
+            border: 1px solid #ced4da;
+            border-radius: 1.5rem;
+            padding: 0.75rem 1rem;
+            font-size: 1rem;
+            margin-right: 0.5rem;
+        }
+        #send-button {
+            border: none;
+            background-color: #007bff;
+            color: white;
+            border-radius: 50%;
+            width: 48px;
+            height: 48px;
+            font-size: 1.5rem;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        #send-button:disabled {
+            background-color: #a0c7ff;
+            cursor: not-allowed;
+        }
+
+
+        /* Pipeline Progress */
+        .pipeline-progress {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            margin-bottom: 1.5rem;
+            padding-bottom: 1.5rem;
+            border-bottom: 1px solid #e9ecef;
+        }
+        .pipeline-step { display: flex; align-items: center; flex-grow: 1; }
+        .pipeline-step-label {
+            padding: 6px 12px; border-radius: 9999px; font-size: 12px;
+            font-weight: 500; white-space: nowrap; transition: all 0.3s ease-in-out;
+        }
+        .pipeline-step-line {
+            flex-grow: 1; height: 4px; background-color: #e9ecef;
+            margin: 0 8px; border-radius: 2px; transition: all 0.3s ease-in-out;
+        }
+
+        /* Node Cards */
+        .node-card-list { display: flex; flex-direction: column; gap: 1rem; }
+        .node-card {
+            border: 1px solid #dee2e6; border-radius: 8px; background-color: #fff;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03); transition: all 0.3s ease-in-out;
+        }
+        .node-card-header {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 1rem; cursor: pointer;
+        }
+        .node-card-header h3 { margin: 0; font-size: 1rem; font-weight: 600; }
+        .node-card-title { display: flex; align-items: center; gap: 0.75rem; }
+        .status-badge { padding: 4px 10px; border-radius: 9999px; font-size: 12px; font-weight: 500; }
+        .node-card-content { padding: 1rem; border-top: 1px solid #e9ecef; font-size: 0.9rem; line-height: 1.5; }
+        .prose { max-width: 100%; white-space: pre-wrap; }
+        .prose pre { background-color: #f1f3f5; padding: 1rem; border-radius: 6px; }
+        .hidden { display: none; }
+
+        /* Status Colors */
+        .status-idle { background-color: #e9ecef; color: #495057; }
+        .status-streaming { background-color: #d0ebff; color: #007bff; }
+        .status-complete { background-color: #c3e6cb; color: #155724; }
+        .line-complete { background-color: #28a745; }
+
+        @keyframes pulse { 50% { opacity: 0.6; } }
+        .animate-pulse { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+    </style>
+</head>
+<body>
+
+    <div class="main-container">
+        <div class="chat-container">
+            <div id="chat-history" class="chat-history">
+                <div class="message bot">
+                    <div class="message-bubble">你好！请粘贴任何文本或URL，我将为您生成笔记。</div>
+                </div>
+            </div>
+            <form id="chat-input-form" class="chat-input-form">
+                <input type="text" id="chat-input" placeholder="输入文本或URL..." autocomplete="off">
+                <button id="send-button" type="submit">&#10148;</button>
+            </form>
+        </div>
+
+        <div class="pipeline-container">
+            <h1>Agent 执行流程</h1>
+            <div id="pipeline-progress" class="pipeline-progress"></div>
+            <div id="node-card-list" class="node-card-list"></div>
+        </div>
+    </div>
+
+    <template id="node-card-template">
+        <div class="node-card">
+            <div class="node-card-header">
+                <div class="node-card-title">
+                    <h3></h3>
+                    <span class="status-badge"></span>
+                </div>
+                <span>&#9660;</span>
+            </div>
+            <div class="node-card-content hidden">
+                <div class="prose"></div>
+            </div>
+        </div>
+    </template>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+
+            const PIPELINE_NODES = [
+              { name: "dispatch", stateKey: "intent", label: "1. 路由" },
+              { name: "ingestion_agent", stateKey: "all_raw_contents", label: "2. 内容提取" },
+              { name: "deduplicator_subgraph", stateKey: "is_duplicate", label: "3. 去重检查" },
+              // The notes_subgraph is complex. We listen for its internal nodes.
+              { name: "draft", stateKey: "final_note_draft", label: "4a. 生成草稿" },
+              { name: "fact_check", stateKey: "fact_check_feedback", label: "4b. 事实审查" },
+              { name: "structure_review", stateKey: "structure_feedback", label: "4c. 结构审查" },
+              { name: "novelty_review", stateKey: "novelty_feedback", label: "4d. 新颖性审查" },
+              { name: "revise", stateKey: "final_note", label: "4e. 修订笔记" },
+            ];
+
+            const pipelineProgressContainer = document.getElementById('pipeline-progress');
+            const nodeCardListContainer = document.getElementById('node-card-list');
+            const nodeCardTemplate = document.getElementById('node-card-template');
+            const chatHistory = document.getElementById('chat-history');
+            const chatForm = document.getElementById('chat-input-form');
+            const chatInput = document.getElementById('chat-input');
+            const sendButton = document.getElementById('send-button');
+
+            // This object holds the real-time state from the server
+            let streamState = {
+                values: {}, 
+                streamingContent: {},
+            };
+            
+            function resetUI() {
+                streamState = { values: {}, streamingContent: {} };
+                render();
+            }
+
+            function addMessageToHistory(text, sender) {
+                const messageDiv = document.createElement('div');
+                messageDiv.className = `message ${sender}`;
+                const bubbleDiv = document.createElement('div');
+                bubbleDiv.className = 'message-bubble';
+                bubbleDiv.textContent = text;
+                messageDiv.appendChild(bubbleDiv);
+                chatHistory.appendChild(messageDiv);
+                chatHistory.scrollTop = chatHistory.scrollHeight;
+            }
+
+            function getNodeStatus(node) {
+                if (streamState.values.hasOwnProperty(node.stateKey)) {
+                    return "complete";
+                }
+                if (streamState.streamingContent[node.name]) {
+                    return "streaming";
+                }
+                return "idle";
+            }
+
+            function formatContent(value) {
+                if (typeof value === "string") return value;
+                if (value == null) return "";
+                if (typeof value === 'boolean') return value ? '是' : '否';
+                
+                // Try to find the actual output from a complex object from the graph state
+                if (typeof value === 'object') {
+                    // For 'ingestion_agent' which outputs a dict with 'has_successful_content'
+                    if (value.hasOwnProperty('has_successful_content')) {
+                        return `提取内容成功: ${value.has_successful_content ? '是' : '否'}.`;
+                    }
+                    // For 'deduplicator'
+                     if (value.hasOwnProperty('is_duplicate')) {
+                        return `是否为重复内容: ${value.is_duplicate ? '是' : '否'}.`;
+                    }
+                    // For reviewer feedback
+                    if (value.messages && Array.isArray(value.messages)) {
+                         const lastMessage = value.messages[value.messages.length - 1];
+                        if (lastMessage && lastMessage.content) {
+                            return formatContent(lastMessage.content);
+                        }
+                    }
+                }
+                return `<pre>${JSON.stringify(value, null, 2)}</pre>`;
+            }
+
+            function render() {
+                // 1. Render Pipeline Progress
+                pipelineProgressContainer.innerHTML = '';
+                const displayedNodes = PIPELINE_NODES.filter(node => getNodeStatus(node) !== 'idle');
+
+                if (displayedNodes.length === 0) {
+                     pipelineProgressContainer.innerHTML = '<p style="color: #6c757d;">等待输入以开始 Agent...</p>';
+                } else {
+                    displayedNodes.forEach((node, i) => {
+                        const status = getNodeStatus(node);
+                        const stepDiv = document.createElement('div');
+                        stepDiv.className = 'pipeline-step';
+
+                        const labelSpan = document.createElement('span');
+                        labelSpan.className = `pipeline-step-label status-${status}`;
+                        if (status === 'streaming') labelSpan.classList.add('animate-pulse');
+                        labelSpan.textContent = node.label;
+                        stepDiv.appendChild(labelSpan);
+
+                        if (i < displayedNodes.length - 1) {
+                            const lineDiv = document.createElement('div');
+                            lineDiv.className = 'pipeline-step-line';
+                            if (status === 'complete') lineDiv.classList.add('line-complete');
+                            stepDiv.appendChild(lineDiv);
+                        }
+                        pipelineProgressContainer.appendChild(stepDiv);
+                    });
+                }
+
+                // 2. Render Node Cards
+                nodeCardListContainer.innerHTML = '';
+                 displayedNodes.forEach(node => {
+                    const status = getNodeStatus(node);
+                    
+                    const cardFragment = nodeCardTemplate.content.cloneNode(true);
+                    const cardElement = cardFragment.querySelector('.node-card');
+                    const headerElement = cardElement.querySelector('.node-card-header');
+                    const titleElement = cardElement.querySelector('h3');
+                    const badgeElement = cardElement.querySelector('.status-badge');
+                    const contentElement = cardElement.querySelector('.node-card-content');
+                    const proseElement = cardElement.querySelector('.prose');
+
+                    titleElement.textContent = node.label;
+                    badgeElement.textContent = { idle: '等待中', streaming: '运行中', complete: '已完成' }[status];
+                    badgeElement.className = `status-badge status-${status}`;
+                     if (status === 'streaming') badgeElement.classList.add('animate-pulse');
+
+                    const displayContent = status === 'complete'
+                        ? formatContent(streamState.values[node.stateKey])
+                        : streamState.streamingContent[node.name] || "";
+
+                    if (displayContent) {
+                        proseElement.innerHTML = displayContent.replace(/\n/g, '<br>');
+                         if (status === 'streaming') {
+                            const cursor = document.createElement('span');
+                            cursor.textContent = '▋';
+                            cursor.className = 'animate-pulse';
+                            proseElement.appendChild(cursor);
+                        }
+                        contentElement.classList.remove('hidden');
+                    } else {
+                        contentElement.classList.add('hidden');
+                    }
+                    
+                    headerElement.onclick = () => {
+                        contentElement.classList.toggle('hidden');
+                        const arrow = headerElement.querySelector('span:last-child');
+                        arrow.innerHTML = contentElement.classList.contains('hidden') ? '&#9660;' : '&#9650;';
+                    };
+
+                    nodeCardListContainer.appendChild(cardElement);
+                });
+            }
+            
+           async function handleSubmit(event) {
+                event.preventDefault();
+                const userInput = chatInput.value.trim();
+                if (!userInput) return;
+
+                addMessageToHistory(userInput, 'user');
+                chatInput.value = '';
+                sendButton.disabled = true;
+                resetUI();
+
+                try {
+                    const response = await fetch('/agent/stream', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ input: userInput }),
+                    });
+
+                    if (!response.body) return;
+
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+                    let buffer = '';
+                    let finalBotMessage = "";
+                    let isFinalNote = false;
+
+                    while (true) {
+                        const { value, done } = await reader.read();
+                        if (done) break;
+                        
+                        buffer += decoder.decode(value, { stream: true });
+                        const lines = buffer.split('\n');
+                        buffer = lines.pop() || ''; // Keep the last, possibly incomplete, line
+
+                        for (const line of lines) {
+                            if (line.startsWith('data: ')) {
+                                const jsonStr = line.substring(6).trim();
+                                if (!jsonStr) continue;
+                                
+                                try {
+                                    const data = JSON.parse(jsonStr);
+                                    
+                                    // Handle streaming content for the pipeline UI
+                                    if (data.event === 'data' && data.node && data.content) {
+                                        streamState.streamingContent[data.node] = (streamState.streamingContent[data.node] || '') + data.content;
+                                        const nodeConfig = PIPELINE_NODES.find(n => n.name === data.node);
+                                        // If this is the final note, accumulate its content for the chat history
+                                        if (nodeConfig && nodeConfig.stateKey === 'final_note') {
+                                             finalBotMessage += data.content;
+                                             isFinalNote = true;
+                                        }
+                                    } 
+                                    // Handle the end of a node's execution
+                                    else if (data.event === 'end' && data.node && data.data) {
+                                        const nodeConfig = PIPELINE_NODES.find(n => n.name === data.node);
+                                        if (nodeConfig) {
+                                            // Store final value for the node
+                                            if (nodeConfig.name === 'draft') {
+                                                streamState.values['final_note_draft'] = data.data;
+                                            } else {
+                                                streamState.values[nodeConfig.stateKey] = data.data;
+                                            }
+                                            delete streamState.streamingContent[data.node];
+                                            
+                                            // --- NEW: Add immediate feedback from dispatcher ---
+                                            if (data.node === 'dispatch' && data.data.response_to_user) {
+                                                addMessageToHistory(data.data.response_to_user, 'bot');
+                                            }
+                                            
+                                            // If this is the final output from the revise node, and we haven't already streamed it
+                                            if (nodeConfig.stateKey === 'final_note' && !isFinalNote) {
+                                                finalBotMessage = formatContent(data.data);
+                                            }
+                                        }
+                                    }
+                                    render(); // Re-render the UI after every update
+                                } catch (e) {
+                                    console.error('Failed to parse stream chunk:', jsonStr, e);
+                                }
+                            }
+                        }
+                    }
+                    if (finalBotMessage) {
+                        addMessageToHistory(finalBotMessage, 'bot');
+                    }
+                } catch (error) {
+                    console.error('Failed to fetch from agent server:', error);
+                    addMessageToHistory('抱歉，连接 Agent 服务器时出错。', 'bot');
+                } finally {
+                    sendButton.disabled = false;
+                }
+            }
+
+            chatForm.addEventListener('submit', handleSubmit);
+            render(); // Initial render
+        });
+    </script>
+
+</body>
+</html>
