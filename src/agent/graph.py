@@ -1,93 +1,89 @@
 """
-Defines the main workflow for the Note Agent by wiring together subgraphs.
+Defines the main, simplified workflow for the Note Agent.
+The new architecture is: Dispatcher -> (if note_taking) -> ReAct Agent -> END
 """
-import os
 from langgraph.graph import StateGraph, END
+from langchain_core.messages import HumanMessage, AIMessage
+
 from agent.state import AgentState
 from agent.utils.logging import logger
+from agent.dispatcher import dispatch
+from agent.react_agent.graph import react_agent_graph, base_prompt
 
-# Import the subgraphs and the dispatcher node
-from agent.subgraphs.dispatcher import dispatch
-from agent.subgraphs.ingestion_agent import ingestion_agent_graph
-from agent.subgraphs.notes_generator import notes_graph
-from agent.subgraphs.deduplicator import deduplicator_graph
 
-# --- Constants for File Output ---
-OUTPUT_DIR = "output"
-OUTPUT_FILENAME = "generated_note.md"
+async def run_react_agent_node(state: AgentState) -> dict:
+    """
+    This node runs the entire ReAct agent sub-graph.
+    It prepares the initial input for the agent and processes its final output.
+    """
+    logger.info("--- Node: ReAct Agent ---")
+    
+    # 1. Prepare the initial message for the agent based on dispatcher output
+    extracted_data = state.get("extracted_data", [])
+    user_input = state.get("user_input", "")
 
-# --- Main Graph Routing Logic ---
+    if not extracted_data:
+        # This should ideally not happen if routing is correct, but as a safeguard:
+        logger.warning("ReAct agent was called but no data was extracted. Ending run.")
+        return {"response_to_user": "抱歉，我不知道要处理什么内容。"}
+
+    # Format the initial user request for the agent, now including the original input
+    task_description = (
+        f"The user's original request was: '{user_input}'.\n\n"
+        "Your task is to fully address this request by processing the following extracted content. "
+        "Pay close attention to any special instructions in the original request (e.g., 'make it detailed', 'summarize briefly').\n\n"
+        "Extracted content to process:\n"
+    )
+    for i, item in enumerate(extracted_data):
+        task_description += f"{i+1}. Type: '{item.type}', Content: '{item.content}'\n"
+    
+    # The initial state for the ReAct agent includes the system prompt and the formatted task
+    initial_agent_messages = base_prompt + [HumanMessage(content=task_description)]
+    
+    # 2. Invoke the ReAct agent graph
+    final_agent_state = await react_agent_graph.ainvoke(
+        {"messages": initial_agent_messages},
+        # Add a high recursion limit to allow for complex multi-step tasks
+        config={"recursion_limit": 50}
+    )
+    
+    # 3. Extract the final response from the agent's message history
+    final_message = final_agent_state["messages"][-1]
+    if isinstance(final_message, AIMessage):
+        response_to_user = final_message.content
+    else:
+        # If the last message is not from the AI, it's likely a tool output.
+        # This indicates the agent may have ended prematurely. We find the last AI message.
+        response_to_user = "Agent finished processing, but the final output was a tool call."
+        for msg in reversed(final_agent_state["messages"]):
+            if isinstance(msg, AIMessage) and msg.content:
+                response_to_user = msg.content
+                break
+    
+    logger.info(f"ReAct Agent finished. Final response: '{response_to_user[:100]}...'")
+    return {"response_to_user": response_to_user}
+
+
 def route_after_dispatch(state: AgentState):
     """
-    After the dispatcher node, decide whether to start processing notes or end.
+    After the dispatcher node, decide whether to start the ReAct agent or end.
     """
     intent = state.get("intent")
     if intent == "note_taking":
-        logger.info("Intent 'note_taking' received. Routing to ingestion agent.")
-        return "ingestion_agent"
-    elif intent in ["waiting", "exit"]:
-        logger.info(f"Intent '{intent}' received. Ending main graph run.")
-        return END
-    else:
-        logger.warning(f"Unknown intent: '{intent}'. Ending graph execution.")
-        return END
-
-def route_after_ingestion(state: AgentState) -> str:
-    """
-    After the content ingestion agent, route based on whether content was successfully parsed.
-    """
-    if state.get("has_successful_content"):
-        logger.info("Ingestion successful. Routing to deduplicator sub-graph.")
-        return "deduplicator_subgraph"
-    else:
-        logger.warning("Ingestion failed or produced no content. Routing back to dispatcher.")
-        state["intent"] = "waiting"
-        errors = state.get("processing_errors", [])
-        state["response_to_user"] = "抱歉，内容处理失败：" + "".join(f"- {e}" for e in errors)
-        return "dispatch"
-
-# --- New Node for Saving File and Finalizing Response ---
-def finalize_and_save_node(state: AgentState) -> dict:
-    """
-    Finalizes the process by saving the note and setting the final user response.
-    """
-    logger.info("--- Node: Finalize and Save Note ---")
-    note_content = state.get("final_note")
-
-    if not note_content or not isinstance(note_content, str):
-        logger.warning("No valid note content found in 'final_note' to save. Skipping.")
-        return {"response_to_user": "抱歉，笔记生成失败，没有有效内容可供保存。"}
-
-    try:
-        # Ensure the output directory exists
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
-        output_path = os.path.join(OUTPUT_DIR, OUTPUT_FILENAME)
-
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(note_content)
-
-        logger.info(f"Successfully saved note to '{output_path}'")
-        
-        # Set the final response for the user, including the note content
-        final_response = f"笔记已成功生成并保存到 `{output_path}`。\n\n---\n\n{note_content}"
-        return {"response_to_user": final_response}
-
-    except IOError as e:
-        logger.error(f"Failed to write note to file: {e}", exc_info=True)
-        # Handle error and inform the user
-        error_message = f"错误：无法将笔记文件保存到 `{output_path}`。"
-        return {"response_to_user": error_message}
-
+        logger.info("Intent 'note_taking' received. Routing to ReAct agent.")
+        return "react_agent"
+    
+    logger.info(f"Intent '{intent}' received. Ending main graph run.")
+    # For "waiting" or "exit", the dispatcher already set the response_to_user.
+    # We can end the graph here.
+    return END
 
 # --- Main Workflow Construction ---
 workflow = StateGraph(AgentState)
 
-# 1. Add nodes (the dispatcher and the compiled subgraphs)
+# 1. Add nodes
 workflow.add_node("dispatch", dispatch)
-workflow.add_node("ingestion_agent", ingestion_agent_graph)
-workflow.add_node("deduplicator_subgraph", deduplicator_graph)
-workflow.add_node("notes_subgraph", notes_graph)
-workflow.add_node("finalize_and_save", finalize_and_save_node) # Add the new save node
+workflow.add_node("react_agent", run_react_agent_node)
 
 # 2. Set entry point
 workflow.set_entry_point("dispatch")
@@ -97,35 +93,28 @@ workflow.add_conditional_edges(
     "dispatch",
     route_after_dispatch,
     {
-        "ingestion_agent": "ingestion_agent",
+        "react_agent": "react_agent",
         END: END,
     },
 )
 
-workflow.add_conditional_edges(
-    "ingestion_agent",
-    route_after_ingestion,
-    {
-        "deduplicator_subgraph": "deduplicator_subgraph",
-        "dispatch": "dispatch", # If ingestion fails, go back to the start
-    },
-)
-
-# After deduplication, always proceed to generate the note.
-# The notes generator will handle whether the content is a duplicate.
-workflow.add_edge("deduplicator_subgraph", "notes_subgraph")
-
-# After generating the note, save it and finalize the response, then end.
-workflow.add_edge("notes_subgraph", "finalize_and_save")
-workflow.add_edge("finalize_and_save", END)
+# After the agent runs, the process is complete.
+workflow.add_edge("react_agent", END)
 
 # 4. Compile the workflow
 graph = workflow.compile()
-graph.name = "主协调 Agent"
+graph.name = "主协调 Agent (ReAct 架构)"
 
 # --- Helper function for visualization ---
 def get_graph(xray: bool = False):
     """
     Returns the uncompiled workflow object to allow for visualization.
+    If xray is true, it will try to show the sub-graph details.
     """
+    if xray:
+        # To visualize the react_agent_graph inside, we can substitute it
+        # This is a bit of a hack for visualization purposes
+        graph_to_draw = workflow.copy()
+        graph_to_draw.nodes["react_agent"]['workflow'] = react_agent_graph
+        return graph_to_draw
     return workflow
