@@ -1,7 +1,0 @@
-{
-    "user_input": "你好，请帮我总结一下E:\\MyCode\\Code\\projects\\note_agent\\server_tmp\\what_is_llm.md",
-    "user_preferences": {
-        "style": "bullet-points",
-        "enable_images": false
-    }
-}
