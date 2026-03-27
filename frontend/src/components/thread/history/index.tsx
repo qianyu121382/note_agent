@@ -1,6 +1,5 @@
 import { Button } from "@/components/ui/button";
-import { useThreads } from "@/providers/Thread";
-import { Thread } from "@langchain/langgraph-sdk";
+import { useThreads, ThreadHistoryItem } from "@/providers/Thread";
 import { useEffect } from "react";
 
 import { getContentString } from "../utils";
@@ -19,7 +18,7 @@ function ThreadList({
   threads,
   onThreadClick,
 }: {
-  threads: Thread[];
+  threads: ThreadHistoryItem[];
   onThreadClick?: (threadId: string) => void;
 }) {
   const [threadId, setThreadId] = useQueryState("threadId");
@@ -27,16 +26,14 @@ function ThreadList({
   return (
     <div className="flex h-full w-full flex-col items-start justify-start gap-2 overflow-y-scroll [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-gray-300 [&::-webkit-scrollbar-track]:bg-transparent">
       {threads.map((t) => {
-        let itemText = t.thread_id;
+        let itemText = t.preview || t.thread_id;
         if (
-          typeof t.values === "object" &&
-          t.values &&
-          "messages" in t.values &&
+          !t.preview &&
+          t.values?.messages &&
           Array.isArray(t.values.messages) &&
-          t.values.messages?.length > 0
+          t.values.messages.length > 0
         ) {
-          const firstMessage = t.values.messages[0];
-          itemText = getContentString(firstMessage.content);
+          itemText = getContentString(t.values.messages[0].content as any);
         }
         return (
           <div
@@ -144,3 +141,4 @@ export default function ThreadHistory() {
     </>
   );
 }
+

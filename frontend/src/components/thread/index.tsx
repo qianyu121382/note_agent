@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from "uuid";
-import { ReactNode, useEffect, useRef } from "react";
+import { ReactNode, useEffect, useMemo, useRef } from "react";
 import { motion } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { useStreamContext } from "@/providers/Stream";
@@ -45,6 +45,16 @@ import {
   ArtifactTitle,
   useArtifactContext,
 } from "./artifact";
+import { MarkdownText } from "./markdown-text";
+import { getContentString } from "./utils";
+
+type PersistedSessionResponse = {
+  thread_id: string;
+  messages: Message[];
+  updated_at?: string | null;
+  active_note_id?: string | null;
+  active_note_title?: string | null;
+};
 
 function StickyToBottomContent(props: {
   content: ReactNode;
@@ -111,6 +121,54 @@ function OpenGitHubRepo() {
   );
 }
 
+function messageKey(message: Message, index: number) {
+  return message.id || `${message.type}-${JSON.stringify(message.content)}-${index}`;
+}
+
+function mergeDisplayMessages(persisted: Message[], current: Message[]) {
+  const seen = new Set<string>();
+  const merged: Message[] = [];
+
+  for (const [index, message] of [...persisted, ...current].entries()) {
+    const key = messageKey(message, index);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(message);
+  }
+
+  return merged;
+}
+
+function ReadOnlyPersistedMessage({ message }: { message: Message }) {
+  const contentString = getContentString(message.content);
+
+  if (message.type === "human") {
+    return (
+      <div className="ml-auto flex items-center gap-2">
+        <p className="bg-muted ml-auto w-fit rounded-3xl px-4 py-2 text-right whitespace-pre-wrap">
+          {contentString || "(empty message)"}
+        </p>
+      </div>
+    );
+  }
+
+  if (message.type === "tool") {
+    return (
+      <div className="mr-auto w-full rounded-xl border border-dashed bg-slate-50 p-3 text-sm text-slate-600 whitespace-pre-wrap">
+        {contentString || JSON.stringify(message.content, null, 2)}
+      </div>
+    );
+  }
+
+  return (
+    <div className="mr-auto flex w-full items-start gap-2">
+      <div className="flex w-full flex-col gap-2 py-1">
+        <MarkdownText>{contentString || "(empty message)"}</MarkdownText>
+      </div>
+    </div>
+  );
+}
+
 export function Thread() {
   const [artifactContext, setArtifactContext] = useArtifactContext();
   const [artifactOpen, closeArtifact] = useArtifactOpen();
@@ -125,6 +183,8 @@ export function Thread() {
     parseAsBoolean.withDefault(false),
   );
   const [input, setInput] = useState("");
+  const [persistedMessages, setPersistedMessages] = useState<Message[]>([]);
+  const [persistedHistoryLoading, setPersistedHistoryLoading] = useState(false);
   const {
     contentBlocks,
     setContentBlocks,
@@ -142,15 +202,63 @@ export function Thread() {
   const messages = stream.messages;
   const isLoading = stream.isLoading;
 
+  const streamMessageKeys = useMemo(
+    () => new Set(messages.map((message, index) => messageKey(message, index))),
+    [messages],
+  );
+  const displayedMessages = useMemo(
+    () => mergeDisplayMessages(persistedMessages, messages),
+    [persistedMessages, messages],
+  );
+
   const lastError = useRef<string | undefined>(undefined);
 
   const setThreadId = (id: string | null) => {
     _setThreadId(id);
+    setPersistedMessages([]);
 
     // close artifact and reset artifact context
     closeArtifact();
     setArtifactContext({});
   };
+
+  useEffect(() => {
+    if (!threadId) {
+      setPersistedMessages([]);
+      return;
+    }
+
+    let cancelled = false;
+    setPersistedHistoryLoading(true);
+    fetch(`/api/session-history/${encodeURIComponent(threadId)}`, {
+      cache: "no-store",
+    })
+      .then(async (response) => {
+        if (!response.ok) {
+          if (response.status === 404) {
+            return { thread_id: threadId, messages: [] } as PersistedSessionResponse;
+          }
+          throw new Error("Failed to load persisted session history.");
+        }
+        return (await response.json()) as PersistedSessionResponse;
+      })
+      .then((data) => {
+        if (cancelled) return;
+        setPersistedMessages(data.messages ?? []);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        console.error(error);
+        setPersistedMessages([]);
+      })
+      .finally(() => {
+        if (!cancelled) setPersistedHistoryLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [threadId]);
 
   useEffect(() => {
     if (!stream.error) {
@@ -160,11 +268,9 @@ export function Thread() {
     try {
       const message = (stream.error as any).message;
       if (!message || lastError.current === message) {
-        // Message has already been logged. do not modify ref, return early.
         return;
       }
 
-      // Message is defined, and it has not been logged yet. Save it, and send the error
       lastError.current = message;
       toast.error("An error occurred. Please try again.", {
         description: (
@@ -180,7 +286,6 @@ export function Thread() {
     }
   }, [stream.error]);
 
-  // TODO: this should be part of the useStream hook
   const prevMessageLength = useRef(0);
   useEffect(() => {
     if (
@@ -239,7 +344,6 @@ export function Thread() {
   const handleRegenerate = (
     parentCheckpoint: Checkpoint | null | undefined,
   ) => {
-    // Do this so the loading state is correct
     prevMessageLength.current = prevMessageLength.current - 1;
     setFirstTokenReceived(false);
     stream.submit(undefined, {
@@ -250,8 +354,8 @@ export function Thread() {
     });
   };
 
-  const chatStarted = !!threadId || !!messages.length;
-  const hasNoAIOrToolMessages = !messages.find(
+  const chatStarted = !!threadId || !!displayedMessages.length;
+  const hasNoAIOrToolMessages = !displayedMessages.find(
     (m) => m.type === "ai" || m.type === "tool",
   );
 
@@ -399,10 +503,23 @@ export function Thread() {
               contentClassName="pt-8 pb-16 max-w-3xl mx-auto flex flex-col gap-4 w-full"
               content={
                 <>
-                  {messages
+                  {displayedMessages
                     .filter((m) => !m.id?.startsWith(DO_NOT_RENDER_ID_PREFIX))
-                    .map((message, index) =>
-                      message.type === "human" ? (
+                    .map((message, index) => {
+                      const key = messageKey(message, index);
+                      const fromLiveStream = streamMessageKeys.has(key);
+
+                      if (!fromLiveStream) {
+                        if (message.type === "tool" && hideToolCalls) return null;
+                        return (
+                          <ReadOnlyPersistedMessage
+                            key={key}
+                            message={message}
+                          />
+                        );
+                      }
+
+                      return message.type === "human" ? (
                         <HumanMessage
                           key={message.id || `${message.type}-${index}`}
                           message={message}
@@ -415,10 +532,11 @@ export function Thread() {
                           isLoading={isLoading}
                           handleRegenerate={handleRegenerate}
                         />
-                      ),
-                    )}
-                  {/* Special rendering case where there are no AI/tool messages, but there is an interrupt.
-                    We need to render it outside of the messages list, since there are no messages to render */}
+                      );
+                    })}
+                  {persistedHistoryLoading && !displayedMessages.length && (
+                    <div className="text-sm text-slate-500">Loading saved session history...</div>
+                  )}
                   {hasNoAIOrToolMessages && !!stream.interrupt && (
                     <AssistantMessage
                       key="interrupt-msg"
@@ -563,3 +681,5 @@ export function Thread() {
     </div>
   );
 }
+
+

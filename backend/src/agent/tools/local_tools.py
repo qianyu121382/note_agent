@@ -18,9 +18,47 @@ from agent.tools.note_store import create_note, get_note, list_notes, update_not
 # --- Constants ---
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 OUTPUT_DIR = PROJECT_ROOT / "data" / "notes"
+SKILLS_DIR = Path(__file__).resolve().parents[1] / "skills"
+SKILL_DESCRIPTIONS = {
+    "create_note": "根据原始资料创建新笔记。适用于 URL、长文本、文件路径整理成 Markdown 笔记。",
+    "edit_note": "修改已有笔记。适用于扩写、压缩、翻译、重写、结构调整等。",
+    "note_qa": "围绕已有笔记问答。适用于总结、解释、提炼重点和基于笔记回答问题。",
+}
 
 
 # --- Tool Definitions ---
+
+@tool
+def list_available_skills() -> str:
+    """
+    Lists the currently available skills and their intended use cases.
+    Use this tool when you need to decide which skill should be loaded for the current task.
+    """
+    lines = ["Available skills:"]
+    for name, description in SKILL_DESCRIPTIONS.items():
+        lines.append(f"- {name}: {description}")
+    return "\n".join(lines)
+
+
+class LoadSkillInput(BaseModel):
+    skill_name: str = Field(description="The skill name to load. Example: create_note, edit_note, note_qa")
+
+
+@tool(args_schema=LoadSkillInput)
+def load_skill(skill_name: str) -> str:
+    """
+    Loads the detailed instructions for a specific skill.
+    Use this tool before executing a clearly identified task type such as creating a note, editing a note, or note QA.
+    """
+    normalized_name = skill_name.strip().lower()
+    skill_path = SKILLS_DIR / f"{normalized_name}.md"
+    if normalized_name not in SKILL_DESCRIPTIONS:
+        available = ", ".join(SKILL_DESCRIPTIONS.keys())
+        return f"Error: Unknown skill '{skill_name}'. Available skills: {available}."
+    if not skill_path.exists():
+        return f"Error: Skill file for '{skill_name}' was not found."
+    return skill_path.read_text(encoding="utf-8")
+
 
 @tool
 def read_local_document(file_path: str) -> str:
@@ -241,6 +279,8 @@ def check_filename_exists(filename: str) -> str:
 
 
 local_tools_list = [
+    list_available_skills,
+    load_skill,
     read_local_document,
     translate_english_to_chinese,
     create_note_record,
@@ -249,6 +289,3 @@ local_tools_list = [
     list_note_records,
     check_filename_exists,
 ]
-
-
-
