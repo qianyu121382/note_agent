@@ -1,25 +1,67 @@
-"""
-定义调度员节点使用的 Pydantic 模型，用于 LLM 的结构化输出。
+﻿"""
+Defines the structured output models used by the dispatcher node.
 """
 from typing import List, Literal, Optional
+
 from pydantic import BaseModel, Field
 
 
 class ExtractedData(BaseModel):
-    """定义从用户输入中提取的数据结构。"""
-    type: Literal["url", "text", "file_path"] = Field(description="提取的数据类型，只能是 'url', 'text', 或 'file_path'")
-    content: str = Field(description="提取出的纯净内容（URL链接或文本）")
+    """Structured content extracted from the latest user input."""
+
+    type: Literal["url", "text", "file_path"] = Field(
+        description="The extracted data type: url, text, or file_path."
+    )
+    content: str = Field(
+        description="The cleaned content value, such as the URL, text body, or local file path."
+    )
 
 
 class DispatcherOutput(BaseModel):
-    """定义调度员LLM输出的完整结构。"""
+    """Structured dispatcher output for routing and operation-level intent."""
+
     intent: Literal["note_taking", "waiting", "exit"] = Field(
-        description="用户的意图, 'note_taking'表示内容符合要求可以处理笔记, 'waiting'表示输入不合规、继续等待, 'exit'表示用户希望退出程序"
+        description=(
+            "The top-level routing result. note_taking means the request should enter the note-processing chain; "
+            "waiting means the input is incomplete or out of scope; exit means the user wants to stop."
+        )
+    )
+    operation: Optional[
+        Literal[
+            "none",
+            "create_note",
+            "locate_note",
+            "general_follow_up",
+            "expand_note",
+            "condense_note",
+            "translate_note",
+            "outline_note",
+            "rewrite_note",
+            "summarize_note",
+            "explain_note",
+            "extract_points",
+        ]
+    ] = Field(
+        default=None,
+        description=(
+            "A finer-grained operation label for note_taking requests. "
+            "Use create_note for new material; use locate_note when the user is clearly referring to an existing note "
+            "but the target note still needs to be located; use edit-style operations such as expand_note / condense_note / "
+            "translate_note / outline_note / rewrite_note for note revisions; use summarize_note / explain_note / "
+            "extract_points for note-based QA. Use general_follow_up when the request is clearly a follow-up but the "
+            "specific operation is not obvious. Use none for waiting or exit."
+        ),
     )
     data: Optional[List[ExtractedData]] = Field(
-        description="一个包含提取数据的列表，当意图是 'note_taking' 时不应为空"
+        description=(
+            "A list of extracted input data items. When note_taking is triggered by newly provided material, this should "
+            "contain the cleaned source items."
+        )
     )
     response_to_user: Optional[str] = Field(
         default=None,
-        description="当意图是 'waiting' 时，此处应包含一句对用户的友好回复，解释为何无法处理并引导用户提供正确输入。"
+        description=(
+            "When intent is waiting, provide a short, natural reply that explains why the request cannot be processed yet "
+            "and guides the user toward providing usable input."
+        ),
     )

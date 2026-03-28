@@ -4,6 +4,16 @@ from typing import Any, Dict
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 from agent.llm import llm
+from agent.session_state import (
+    looks_like_edit_request,
+    looks_like_note_lookup_request,
+    looks_like_note_reference,
+    looks_like_qa_request,
+    normalize_mode,
+    normalize_operation,
+    resolve_mode,
+    resolve_operation,
+)
 from agent.utils.logging import logger
 
 from .prompts import create_dispatcher_prompt
@@ -13,33 +23,6 @@ structured_llm = llm.with_structured_output(DispatcherOutput)
 dispatcher_prompt = create_dispatcher_prompt()
 dispatcher_chain = dispatcher_prompt | structured_llm
 
-EDIT_KEYWORDS = {
-    "modify",
-    "edit",
-    "update",
-    "rewrite",
-    "revise",
-    "expand",
-    "shorten",
-    "translate",
-    "polish",
-    "refine",
-    "improve",
-    "change",
-    "补充",
-    "修改",
-    "改",
-    "重写",
-    "润色",
-    "扩写",
-    "精简",
-    "翻译",
-    "完善",
-    "刚才",
-    "这篇",
-    "上一篇",
-    "刚刚",
-}
 
 
 def _extract_user_input(state: Dict[str, Any]) -> str:
@@ -102,31 +85,97 @@ def _extract_user_input(state: Dict[str, Any]) -> str:
     return ""
 
 
-def _looks_like_edit_request(user_input: str) -> bool:
-    lowered = user_input.lower()
-    return any(keyword in lowered for keyword in EDIT_KEYWORDS)
+
+def _route_existing_note_request(
+    *,
+    user_input: str,
+    active_note_id: str | None,
+    current_operation: str,
+) -> dict[str, Any] | None:
+    has_note_reference = looks_like_note_reference(user_input) or looks_like_note_lookup_request(user_input)
+    if not has_note_reference:
+        return None
+
+    if active_note_id and looks_like_edit_request(user_input):
+        logger.info(
+            "Detected follow-up edit request with active note '%s'. Routing directly to note_taking/edit.",
+            active_note_id,
+        )
+        mode = "edit"
+        return {
+            "intent": "note_taking",
+            "mode": mode,
+            "operation": resolve_operation(
+                current_operation=current_operation,
+                mode=mode,
+                intent="note_taking",
+                user_input=user_input,
+                has_extracted_data=False,
+            ),
+            "extracted_data": [],
+        }
+
+    if active_note_id and looks_like_qa_request(user_input):
+        logger.info(
+            "Detected follow-up QA request with active note '%s'. Routing directly to note_taking/qa.",
+            active_note_id,
+        )
+        mode = "qa"
+        return {
+            "intent": "note_taking",
+            "mode": mode,
+            "operation": resolve_operation(
+                current_operation=current_operation,
+                mode=mode,
+                intent="note_taking",
+                user_input=user_input,
+                has_extracted_data=False,
+            ),
+            "extracted_data": [],
+        }
+
+    if looks_like_note_lookup_request(user_input) or (not active_note_id and has_note_reference):
+        inferred_mode = "qa" if looks_like_qa_request(user_input) else "edit"
+        logger.info(
+            "Detected existing-note request without active note. Routing to note_taking/locate_note with inferred mode '%s'.",
+            inferred_mode,
+        )
+        return {
+            "intent": "note_taking",
+            "mode": inferred_mode,
+            "operation": "locate_note",
+            "extracted_data": [],
+        }
+
+    return None
+
 
 
 def dispatch(state: Dict[str, Any]) -> Dict[str, Any]:
     """Analyze the user input, determine intent, and extract useful content."""
     logger.info("--- Node: Dispatcher ---")
     user_input = _extract_user_input(state)
+    current_mode = normalize_mode(state.get("mode"))
+    current_operation = normalize_operation(state.get("operation"))
     if not user_input:
         logger.warning("User input is empty.")
-        return {"intent": "waiting", "extracted_data": []}
+        return {
+            "intent": "waiting",
+            "mode": current_mode,
+            "operation": current_operation,
+            "extracted_data": [],
+        }
 
     logger.info(f"Analyzing user input: '{user_input[:80]}...'")
 
     active_note_id = state.get("active_note_id")
-    if active_note_id and _looks_like_edit_request(user_input):
-        logger.info(
-            "Detected follow-up edit request with active note '%s'. Routing directly to note_taking.",
-            active_note_id,
-        )
-        return {
-            "intent": "note_taking",
-            "extracted_data": [],
-        }
+    existing_note_route = _route_existing_note_request(
+        user_input=user_input,
+        active_note_id=active_note_id,
+        current_operation=current_operation,
+    )
+    if existing_note_route is not None:
+        return existing_note_route
 
     response: DispatcherOutput = dispatcher_chain.invoke({"user_input": user_input})
 
@@ -138,7 +187,27 @@ def dispatch(state: Dict[str, Any]) -> Dict[str, Any]:
         for item in response.data:
             logger.debug(f"Extracted data: type='{item.type}', content='{item.content[:100]}...'")
 
-    result = {"intent": response.intent, "extracted_data": response.data}
+    mode = resolve_mode(
+        current_mode=current_mode,
+        intent=response.intent,
+        user_input=user_input,
+        has_active_note=bool(active_note_id),
+        has_extracted_data=bool(response.data),
+    )
+    operation = resolve_operation(
+        current_operation=current_operation,
+        mode=mode,
+        intent=response.intent,
+        user_input=user_input,
+        has_extracted_data=bool(response.data),
+        llm_operation=response.operation,
+    )
+    result = {
+        "intent": response.intent,
+        "mode": mode,
+        "operation": operation,
+        "extracted_data": response.data,
+    }
     if response.intent == "waiting" and response.response_to_user:
         result["messages"] = [AIMessage(content=response.response_to_user)]
 

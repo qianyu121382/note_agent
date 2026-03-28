@@ -44,7 +44,18 @@ class NoteRecord(BaseModel):
     content: str
 
 
+class NoteConflictError(Exception):
+    def __init__(self, note_id: str, expected_version: int, actual_version: int):
+        self.note_id = note_id
+        self.expected_version = expected_version
+        self.actual_version = actual_version
+        super().__init__(
+            f"Conflict updating note '{note_id}': expected version {expected_version}, actual version {actual_version}."
+        )
+
+
 SAFE_FILENAME_RE = re.compile(r"[^a-zA-Z0-9_.-]+")
+TOKEN_RE = re.compile(r"[A-Za-z0-9_\-\u4e00-\u9fff]+")
 
 
 def _now_iso() -> str:
@@ -129,6 +140,57 @@ def list_notes(limit: int = 20) -> list[dict[str, Any]]:
     return notes[: max(limit, 0)]
 
 
+def _tokenize_query(value: str) -> list[str]:
+    return [token.lower() for token in TOKEN_RE.findall(value)]
+
+
+def search_notes(query: str, limit: int = 5) -> list[dict[str, Any]]:
+    notes = list_notes(limit=200)
+    cleaned_query = query.strip()
+    if not cleaned_query:
+        return notes[: max(limit, 0)]
+
+    query_lower = cleaned_query.lower()
+    query_tokens = _tokenize_query(cleaned_query)
+    scored: list[tuple[int, dict[str, Any]]] = []
+
+    for note in notes:
+        title = str(note.get("title", ""))
+        summary = str(note.get("summary", ""))
+        note_id = str(note.get("note_id", ""))
+        filename = str(note.get("filename", ""))
+        haystack = " ".join([title, summary, note_id, filename]).lower()
+
+        score = 0
+        if note_id.lower() == query_lower:
+            score += 100
+        if query_lower in title.lower():
+            score += 40
+        if query_lower in summary.lower():
+            score += 20
+        if query_lower in haystack:
+            score += 10
+
+        for token in query_tokens:
+            if token == note_id.lower():
+                score += 25
+            if token in title.lower():
+                score += 12
+            if token in summary.lower():
+                score += 6
+            if token in haystack:
+                score += 3
+
+        if score > 0:
+            scored.append((score, note))
+
+    scored.sort(
+        key=lambda item: (item[0], item[1].get("updated_at", "")),
+        reverse=True,
+    )
+    return [note for _, note in scored[: max(limit, 0)]]
+
+
 def create_note(
     title: str,
     content: str,
@@ -195,12 +257,20 @@ def update_note(
     source_ref: Optional[str] = None,
     thread_id: Optional[str] = None,
     last_modified_from: str = "edit",
+    expected_version: Optional[int] = None,
 ) -> Optional[NoteMetadata]:
     record = get_note(note_id)
     if record is None:
         return None
 
     metadata = record.metadata
+    if expected_version is not None and metadata.version != expected_version:
+        raise NoteConflictError(
+            note_id=note_id,
+            expected_version=expected_version,
+            actual_version=metadata.version,
+        )
+
     old_note_path = _note_path(metadata.filename)
 
     if title is not None and title.strip():
@@ -233,4 +303,3 @@ def update_note(
     )
     _upsert_index(metadata)
     return metadata
-

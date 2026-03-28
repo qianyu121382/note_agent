@@ -16,6 +16,5 @@ dependencies = [
     "langchain_mcp_adapters",
 ]
 
-
 [project.optional-dependencies]
 dev = ["mypy>=1.11.1", "ruff>=0.6.1", "pygraphviz>=1.12"]

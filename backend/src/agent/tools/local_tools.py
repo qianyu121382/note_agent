@@ -13,7 +13,14 @@ from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
 from agent.llm import llm
-from agent.tools.note_store import create_note, get_note, list_notes, update_note
+from agent.tools.note_store import (
+    NoteConflictError,
+    create_note,
+    get_note,
+    list_notes,
+    search_notes,
+    update_note,
+)
 
 # --- Constants ---
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -23,6 +30,7 @@ SKILL_DESCRIPTIONS = {
     "create_note": "根据原始资料创建新笔记。适用于 URL、长文本、文件路径整理成 Markdown 笔记。",
     "edit_note": "修改已有笔记。适用于扩写、压缩、翻译、重写、结构调整等。",
     "note_qa": "围绕已有笔记问答。适用于总结、解释、提炼重点和基于笔记回答问题。",
+    "locate_note": "定位目标笔记。适用于新线程中先查找“刚才那篇”“RAG 那篇”“agent 那篇”等已有笔记。",
 }
 
 
@@ -41,14 +49,14 @@ def list_available_skills() -> str:
 
 
 class LoadSkillInput(BaseModel):
-    skill_name: str = Field(description="The skill name to load. Example: create_note, edit_note, note_qa")
+    skill_name: str = Field(description="The skill name to load. Example: create_note, edit_note, note_qa, locate_note")
 
 
 @tool(args_schema=LoadSkillInput)
 def load_skill(skill_name: str) -> str:
     """
     Loads the detailed instructions for a specific skill.
-    Use this tool before executing a clearly identified task type such as creating a note, editing a note, or note QA.
+    Use this tool before executing a clearly identified task type such as creating a note, editing a note, note QA, or locating a note.
     """
     normalized_name = skill_name.strip().lower()
     skill_path = SKILLS_DIR / f"{normalized_name}.md"
@@ -196,6 +204,10 @@ class UpdateNoteInput(BaseModel):
     summary: str | None = Field(default=None, description="Optional updated summary.")
     tags: list[str] | None = Field(default=None, description="Optional updated tags.")
     thread_id: str | None = Field(default=None, description="Optional thread id to associate with the note.")
+    expected_version: int | None = Field(
+        default=None,
+        description="The version the caller expects to update. Use the current note metadata version to avoid overwriting concurrent edits.",
+    )
 
 
 @tool(args_schema=UpdateNoteInput)
@@ -206,6 +218,7 @@ def update_note_record(
     summary: str | None = None,
     tags: list[str] | None = None,
     thread_id: str | None = None,
+    expected_version: int | None = None,
 ) -> str:
     """
     Updates an existing stored note and bumps its metadata version.
@@ -214,15 +227,24 @@ def update_note_record(
     if not note_content or not isinstance(note_content, str):
         return "Error: note_content cannot be empty."
 
-    metadata = update_note(
-        note_id,
-        content=note_content,
-        title=title,
-        summary=summary,
-        tags=tags,
-        thread_id=thread_id,
-        last_modified_from="edit",
-    )
+    try:
+        metadata = update_note(
+            note_id,
+            content=note_content,
+            title=title,
+            summary=summary,
+            tags=tags,
+            thread_id=thread_id,
+            last_modified_from="edit",
+            expected_version=expected_version,
+        )
+    except NoteConflictError as exc:
+        return (
+            f"Conflict: note '{exc.note_id}' has been updated by another session. "
+            f"Expected version {exc.expected_version}, but current version is {exc.actual_version}. "
+            "Read the latest note before applying further changes."
+        )
+
     if metadata is None:
         return f"Error: Note with id '{note_id}' was not found."
 
@@ -253,6 +275,30 @@ def list_note_records(limit: int = 20) -> str:
             f"version: {note.get('version')} | updated_at: {note.get('updated_at')}"
         )
     return "Stored notes:\n" + "\n".join(lines)
+
+
+class SearchNotesInput(BaseModel):
+    query: str = Field(description="Keywords describing the target note, such as title words, topic words, or phrases like 'RAG' or 'agent'.")
+    limit: int = Field(default=5, description="Maximum number of candidate notes to return.")
+
+
+@tool(args_schema=SearchNotesInput)
+def search_note_records(query: str, limit: int = 5) -> str:
+    """
+    Searches stored notes by note_id, title, summary, and filename.
+    Use this tool when the user refers to an existing note but the exact note_id is unknown.
+    """
+    matches = search_notes(query=query, limit=limit)
+    if not matches:
+        return f"No matching notes were found for query '{query}'."
+
+    lines = [f"Candidate notes for '{query}':"]
+    for note in matches:
+        lines.append(
+            f"- note_id: {note.get('note_id')} | title: {note.get('title')} | "
+            f"summary: {note.get('summary', '')} | version: {note.get('version')} | updated_at: {note.get('updated_at')}"
+        )
+    return "\n".join(lines)
 
 
 class CheckFilenameInput(BaseModel):
@@ -287,5 +333,6 @@ local_tools_list = [
     read_note,
     update_note_record,
     list_note_records,
+    search_note_records,
     check_filename_exists,
 ]

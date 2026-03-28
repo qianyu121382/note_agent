@@ -1,5 +1,5 @@
-import { Button } from "@/components/ui/button";
-import { useThreads, ThreadHistoryItem } from "@/providers/Thread";
+﻿import { Button } from "@/components/ui/button";
+import { useThreads, ThreadHistoryItem, ThreadMode } from "@/providers/Thread";
 import { useEffect } from "react";
 
 import { getContentString } from "../utils";
@@ -13,6 +13,32 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { PanelRightOpen, PanelRightClose } from "lucide-react";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
+
+function getModeLabel(mode?: ThreadMode) {
+  switch (mode) {
+    case "create":
+      return "Create";
+    case "edit":
+      return "Edit";
+    case "qa":
+      return "QA";
+    default:
+      return "Idle";
+  }
+}
+
+function getModeClasses(mode?: ThreadMode) {
+  switch (mode) {
+    case "create":
+      return "bg-emerald-50 text-emerald-700 border-emerald-200";
+    case "edit":
+      return "bg-amber-50 text-amber-700 border-amber-200";
+    case "qa":
+      return "bg-sky-50 text-sky-700 border-sky-200";
+    default:
+      return "bg-slate-50 text-slate-600 border-slate-200";
+  }
+}
 
 function ThreadList({
   threads,
@@ -42,7 +68,7 @@ function ThreadList({
           >
             <Button
               variant="ghost"
-              className="w-[280px] items-start justify-start text-left font-normal"
+              className="flex h-auto w-[280px] flex-col items-start justify-start gap-2 px-3 py-2 text-left font-normal"
               onClick={(e) => {
                 e.preventDefault();
                 onThreadClick?.(t.thread_id);
@@ -50,7 +76,19 @@ function ThreadList({
                 setThreadId(t.thread_id);
               }}
             >
-              <p className="truncate text-ellipsis">{itemText}</p>
+              <div className="flex w-full items-center justify-between gap-2">
+                <span className="truncate text-ellipsis text-sm">{itemText}</span>
+                <span
+                  className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${getModeClasses(t.mode)}`}
+                >
+                  {getModeLabel(t.mode)}
+                </span>
+              </div>
+              {t.active_note_title ? (
+                <p className="text-muted-foreground line-clamp-1 text-xs">
+                  {t.active_note_title}
+                </p>
+              ) : null}
             </Button>
           </div>
         );
@@ -65,7 +103,7 @@ function ThreadHistoryLoading() {
       {Array.from({ length: 30 }).map((_, i) => (
         <Skeleton
           key={`skeleton-${i}`}
-          className="h-10 w-[280px]"
+          className="h-14 w-[280px]"
         />
       ))}
     </div>
@@ -141,4 +179,3 @@ export default function ThreadHistory() {
     </>
   );
 }
-

@@ -1,4 +1,4 @@
-import { validate } from "uuid";
+﻿import { validate } from "uuid";
 import { getApiKey } from "@/lib/api-key";
 import { Thread } from "@langchain/langgraph-sdk";
 import { useQueryState } from "nuqs";
@@ -13,10 +13,15 @@ import {
 } from "react";
 import { createClient } from "./client";
 
+export type ThreadMode = "idle" | "create" | "edit" | "qa";
+
 export interface ThreadHistoryItem {
   thread_id: string;
   updated_at?: string | null;
   preview?: string;
+  mode?: ThreadMode;
+  active_note_id?: string | null;
+  active_note_title?: string | null;
   values?: {
     messages?: Array<{
       id?: string;
@@ -62,6 +67,9 @@ function mergeThreads(
       thread_id: thread.thread_id,
       updated_at: existing?.updated_at ?? null,
       preview: existing?.preview,
+      mode: existing?.mode ?? "idle",
+      active_note_id: existing?.active_note_id ?? null,
+      active_note_title: existing?.active_note_title ?? null,
       values: {
         messages:
           existing?.values?.messages ??
@@ -144,4 +152,3 @@ export function useThreads() {
   }
   return context;
 }
-
