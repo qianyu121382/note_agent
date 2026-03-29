@@ -1,19 +1,26 @@
 ﻿from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 from uuid import uuid4
 
+from psycopg import connect
 from pydantic import BaseModel, Field
+
+from agent.utils.logging import logger
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DATA_DIR = PROJECT_ROOT / "data"
-NOTES_DIR = DATA_DIR / "notes"
-NOTES_META_DIR = DATA_DIR / "notes_meta"
-NOTES_INDEX_PATH = DATA_DIR / "notes_index.json"
+LEGACY_NOTES_DIR = DATA_DIR / "notes"
+LEGACY_NOTES_META_DIR = DATA_DIR / "notes_meta"
+TABLE_NAME = "notes"
+
+SAFE_FILENAME_RE = re.compile(r"[^a-zA-Z0-9_.-]+")
+TOKEN_RE = re.compile(r"[A-Za-z0-9_\-\u4e00-\u9fff]+")
 
 
 class SourceRef(BaseModel):
@@ -54,19 +61,55 @@ class NoteConflictError(Exception):
         )
 
 
-SAFE_FILENAME_RE = re.compile(r"[^a-zA-Z0-9_.-]+")
-TOKEN_RE = re.compile(r"[A-Za-z0-9_\-\u4e00-\u9fff]+")
-
-
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _ensure_dirs() -> None:
-    NOTES_DIR.mkdir(parents=True, exist_ok=True)
-    NOTES_META_DIR.mkdir(parents=True, exist_ok=True)
-    if not NOTES_INDEX_PATH.exists():
-        NOTES_INDEX_PATH.write_text('{"notes": []}', encoding="utf-8")
+def _get_postgres_uri() -> str:
+    value = os.getenv("POSTGRES_URI")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    raise RuntimeError("POSTGRES_URI is required for note storage.")
+
+
+def _connect(*, autocommit: bool = True):
+    return connect(_get_postgres_uri(), autocommit=autocommit)
+
+
+def _ensure_table() -> None:
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
+                    note_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    filename TEXT NOT NULL UNIQUE,
+                    content TEXT NOT NULL,
+                    summary TEXT NOT NULL DEFAULT '',
+                    tags JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    source_type TEXT NOT NULL DEFAULT 'text',
+                    source_ref TEXT NOT NULL DEFAULT '',
+                    source_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    thread_id TEXT,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    version INTEGER NOT NULL DEFAULT 1,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL,
+                    last_modified_from TEXT NOT NULL DEFAULT 'create',
+                    rag_indexed BOOLEAN NOT NULL DEFAULT FALSE
+                )
+                """
+            )
+            cur.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{TABLE_NAME}_updated_at ON {TABLE_NAME} (updated_at DESC)"
+            )
+            cur.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{TABLE_NAME}_thread_id ON {TABLE_NAME} (thread_id)"
+            )
+            cur.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{TABLE_NAME}_title ON {TABLE_NAME} (title)"
+            )
 
 
 def _sanitize_filename_stem(value: str) -> str:
@@ -80,34 +123,32 @@ def _build_filename(note_id: str, title: str) -> str:
     return f"{note_id}_{stem}.md"
 
 
-def _meta_path(note_id: str) -> Path:
-    return NOTES_META_DIR / f"{note_id}.json"
+def _serialize_source_refs(source_refs: list[SourceRef]) -> str:
+    return json.dumps([item.model_dump() for item in source_refs], ensure_ascii=False)
 
 
-def _note_path(filename: str) -> Path:
-    return NOTES_DIR / filename
-
-
-def _load_index() -> dict[str, Any]:
-    _ensure_dirs()
-    try:
-        return json.loads(NOTES_INDEX_PATH.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {"notes": []}
-
-
-def _save_index(index_data: dict[str, Any]) -> None:
-    _ensure_dirs()
-    NOTES_INDEX_PATH.write_text(
-        json.dumps(index_data, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+def _row_to_metadata(row: dict[str, Any]) -> NoteMetadata:
+    return NoteMetadata(
+        note_id=row["note_id"],
+        title=row["title"],
+        filename=row["filename"],
+        summary=row.get("summary") or "",
+        tags=list(row.get("tags") or []),
+        source_type=row.get("source_type") or "text",
+        source_ref=row.get("source_ref") or "",
+        source_refs=[SourceRef(**item) for item in (row.get("source_refs") or [])],
+        thread_id=row.get("thread_id"),
+        status=row.get("status") or "active",
+        version=int(row.get("version") or 1),
+        created_at=row["created_at"].isoformat() if hasattr(row["created_at"], "isoformat") else str(row["created_at"]),
+        updated_at=row["updated_at"].isoformat() if hasattr(row["updated_at"], "isoformat") else str(row["updated_at"]),
+        last_modified_from=row.get("last_modified_from") or "create",
+        rag_indexed=bool(row.get("rag_indexed")),
     )
 
 
-def _upsert_index(metadata: NoteMetadata) -> None:
-    index_data = _load_index()
-    notes = index_data.get("notes", [])
-    summary_entry = {
+def _summary_row_from_metadata(metadata: NoteMetadata) -> dict[str, Any]:
+    return {
         "note_id": metadata.note_id,
         "title": metadata.title,
         "filename": metadata.filename,
@@ -119,25 +160,39 @@ def _upsert_index(metadata: NoteMetadata) -> None:
         "source_type": metadata.source_type,
     }
 
-    for idx, note in enumerate(notes):
-        if note.get("note_id") == metadata.note_id:
-            notes[idx] = summary_entry
-            break
-    else:
-        notes.append(summary_entry)
 
-    index_data["notes"] = sorted(
-        notes,
-        key=lambda item: item.get("updated_at", ""),
-        reverse=True,
-    )
-    _save_index(index_data)
+def _set_rag_indexed(note_id: str, rag_indexed: bool) -> None:
+    _ensure_table()
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE {TABLE_NAME} SET rag_indexed = %s, updated_at = updated_at WHERE note_id = %s",
+                (rag_indexed, note_id),
+            )
 
 
 def list_notes(limit: int = 20) -> list[dict[str, Any]]:
-    index_data = _load_index()
-    notes = index_data.get("notes", [])
-    return notes[: max(limit, 0)]
+    _ensure_table()
+    with _connect() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                f"""
+                SELECT note_id, title, filename, summary, updated_at, thread_id, version, status, source_type
+                FROM {TABLE_NAME}
+                ORDER BY updated_at DESC
+                LIMIT %s
+                """,
+                (max(limit, 0),),
+            )
+            rows = cur.fetchall()
+    summaries = []
+    for row in rows:
+        item = dict(row)
+        updated = item.get("updated_at")
+        if hasattr(updated, "isoformat"):
+            item["updated_at"] = updated.isoformat()
+        summaries.append(item)
+    return summaries
 
 
 def _tokenize_query(value: str) -> list[str]:
@@ -202,12 +257,11 @@ def create_note(
     source_refs: Optional[list[dict[str, str]]] = None,
     thread_id: Optional[str] = None,
 ) -> NoteMetadata:
-    _ensure_dirs()
+    _ensure_table()
 
     note_id = f"note_{uuid4().hex[:12]}"
     filename = _build_filename(note_id, title)
-    timestamp = _now_iso()
-
+    timestamp = datetime.now(timezone.utc)
     metadata = NoteMetadata(
         note_id=note_id,
         title=title.strip() or "Untitled Note",
@@ -218,32 +272,70 @@ def create_note(
         source_ref=source_ref.strip(),
         source_refs=[SourceRef(**item) for item in (source_refs or [])],
         thread_id=thread_id,
-        created_at=timestamp,
-        updated_at=timestamp,
+        created_at=timestamp.isoformat(),
+        updated_at=timestamp.isoformat(),
         last_modified_from="create",
     )
 
-    _note_path(metadata.filename).write_text(content, encoding="utf-8")
-    _meta_path(metadata.note_id).write_text(
-        json.dumps(metadata.model_dump(), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    _upsert_index(metadata)
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO {TABLE_NAME} (
+                    note_id, title, filename, content, summary, tags, source_type,
+                    source_ref, source_refs, thread_id, status, version,
+                    created_at, updated_at, last_modified_from, rag_indexed
+                )
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    metadata.note_id,
+                    metadata.title,
+                    metadata.filename,
+                    content,
+                    metadata.summary,
+                    json.dumps(metadata.tags, ensure_ascii=False),
+                    metadata.source_type,
+                    metadata.source_ref,
+                    _serialize_source_refs(metadata.source_refs),
+                    metadata.thread_id,
+                    metadata.status,
+                    metadata.version,
+                    metadata.created_at,
+                    metadata.updated_at,
+                    metadata.last_modified_from,
+                    metadata.rag_indexed,
+                ),
+            )
+
+    try:
+        from agent.tools.rag_store import rebuild_note_rag_index
+
+        rebuild_note_rag_index(
+            note_id=metadata.note_id,
+            title=metadata.title,
+            content=content,
+            source_ref=metadata.source_ref,
+        )
+        metadata.rag_indexed = True
+        _set_rag_indexed(metadata.note_id, True)
+    except Exception as exc:
+        metadata.rag_indexed = False
+        _set_rag_indexed(metadata.note_id, False)
+        logger.warning("Failed to build RAG index for note '%s': %s", metadata.note_id, exc)
     return metadata
 
 
 def get_note(note_id: str) -> Optional[NoteRecord]:
-    _ensure_dirs()
-    meta_file = _meta_path(note_id)
-    if not meta_file.exists():
+    _ensure_table()
+    with _connect() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(f"SELECT * FROM {TABLE_NAME} WHERE note_id = %s LIMIT 1", (note_id,))
+            row = cur.fetchone()
+    if row is None:
         return None
-
-    metadata = NoteMetadata.model_validate_json(meta_file.read_text(encoding="utf-8"))
-    note_file = _note_path(metadata.filename)
-    if not note_file.exists():
-        return None
-
-    return NoteRecord(metadata=metadata, content=note_file.read_text(encoding="utf-8"))
+    metadata = _row_to_metadata(dict(row))
+    return NoteRecord(metadata=metadata, content=row["content"])
 
 
 def update_note(
@@ -259,47 +351,169 @@ def update_note(
     last_modified_from: str = "edit",
     expected_version: Optional[int] = None,
 ) -> Optional[NoteMetadata]:
-    record = get_note(note_id)
-    if record is None:
-        return None
+    _ensure_table()
+    with _connect(autocommit=False) as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(f"SELECT * FROM {TABLE_NAME} WHERE note_id = %s FOR UPDATE", (note_id,))
+            row = cur.fetchone()
+            if row is None:
+                conn.rollback()
+                return None
 
-    metadata = record.metadata
-    if expected_version is not None and metadata.version != expected_version:
-        raise NoteConflictError(
-            note_id=note_id,
-            expected_version=expected_version,
-            actual_version=metadata.version,
+            metadata = _row_to_metadata(dict(row))
+            if expected_version is not None and metadata.version != expected_version:
+                conn.rollback()
+                raise NoteConflictError(
+                    note_id=note_id,
+                    expected_version=expected_version,
+                    actual_version=metadata.version,
+                )
+
+            if title is not None and title.strip():
+                metadata.title = title.strip()
+                metadata.filename = _build_filename(note_id, metadata.title)
+            if summary is not None:
+                metadata.summary = summary.strip()
+            if tags is not None:
+                metadata.tags = tags
+            if source_type is not None and source_type.strip():
+                metadata.source_type = source_type
+            if source_ref is not None:
+                metadata.source_ref = source_ref.strip()
+            if thread_id is not None:
+                metadata.thread_id = thread_id
+
+            metadata.version += 1
+            metadata.updated_at = _now_iso()
+            metadata.last_modified_from = last_modified_from
+            metadata.rag_indexed = False
+
+            cur.execute(
+                f"""
+                UPDATE {TABLE_NAME}
+                SET title = %s,
+                    filename = %s,
+                    content = %s,
+                    summary = %s,
+                    tags = %s::jsonb,
+                    source_type = %s,
+                    source_ref = %s,
+                    thread_id = %s,
+                    version = %s,
+                    updated_at = %s,
+                    last_modified_from = %s,
+                    rag_indexed = %s
+                WHERE note_id = %s
+                """,
+                (
+                    metadata.title,
+                    metadata.filename,
+                    content,
+                    metadata.summary,
+                    json.dumps(metadata.tags, ensure_ascii=False),
+                    metadata.source_type,
+                    metadata.source_ref,
+                    metadata.thread_id,
+                    metadata.version,
+                    metadata.updated_at,
+                    metadata.last_modified_from,
+                    metadata.rag_indexed,
+                    note_id,
+                ),
+            )
+        conn.commit()
+
+    try:
+        from agent.tools.rag_store import rebuild_note_rag_index
+
+        rebuild_note_rag_index(
+            note_id=metadata.note_id,
+            title=metadata.title,
+            content=content,
+            source_ref=metadata.source_ref,
         )
-
-    old_note_path = _note_path(metadata.filename)
-
-    if title is not None and title.strip():
-        metadata.title = title.strip()
-        metadata.filename = _build_filename(note_id, metadata.title)
-    if summary is not None:
-        metadata.summary = summary.strip()
-    if tags is not None:
-        metadata.tags = tags
-    if source_type is not None and source_type.strip():
-        metadata.source_type = source_type
-    if source_ref is not None:
-        metadata.source_ref = source_ref.strip()
-    if thread_id is not None:
-        metadata.thread_id = thread_id
-
-    metadata.version += 1
-    metadata.updated_at = _now_iso()
-    metadata.last_modified_from = last_modified_from
-    metadata.rag_indexed = False
-
-    new_note_path = _note_path(metadata.filename)
-    if old_note_path != new_note_path and old_note_path.exists():
-        old_note_path.unlink()
-
-    new_note_path.write_text(content, encoding="utf-8")
-    _meta_path(note_id).write_text(
-        json.dumps(metadata.model_dump(), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    _upsert_index(metadata)
+        metadata.rag_indexed = True
+        _set_rag_indexed(metadata.note_id, True)
+    except Exception as exc:
+        metadata.rag_indexed = False
+        _set_rag_indexed(metadata.note_id, False)
+        logger.warning("Failed to rebuild RAG index for note '%s': %s", metadata.note_id, exc)
     return metadata
+
+
+def note_filename_exists(filename: str) -> bool:
+    _ensure_table()
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT 1 FROM {TABLE_NAME} WHERE filename = %s LIMIT 1", (filename,))
+            return cur.fetchone() is not None
+
+
+def import_legacy_notes_from_disk() -> int:
+    _ensure_table()
+    imported = 0
+    if not LEGACY_NOTES_META_DIR.exists():
+        return imported
+
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            for meta_path in sorted(LEGACY_NOTES_META_DIR.glob("*.json")):
+                payload = json.loads(meta_path.read_text(encoding="utf-8"))
+                note_id = payload.get("note_id")
+                if not note_id:
+                    continue
+                filename = payload.get("filename") or _build_filename(note_id, payload.get("title", "Untitled Note"))
+                content_path = LEGACY_NOTES_DIR / filename
+                if not content_path.exists():
+                    continue
+                content = content_path.read_text(encoding="utf-8")
+                source_refs = payload.get("source_refs") or []
+                tags = payload.get("tags") or []
+                cur.execute(
+                    f"""
+                    INSERT INTO {TABLE_NAME} (
+                        note_id, title, filename, content, summary, tags, source_type,
+                        source_ref, source_refs, thread_id, status, version,
+                        created_at, updated_at, last_modified_from, rag_indexed
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (note_id) DO NOTHING
+                    """,
+                    (
+                        note_id,
+                        payload.get("title") or "Untitled Note",
+                        filename,
+                        content,
+                        payload.get("summary") or "",
+                        json.dumps(tags, ensure_ascii=False),
+                        payload.get("source_type") or "text",
+                        payload.get("source_ref") or "",
+                        json.dumps(source_refs, ensure_ascii=False),
+                        payload.get("thread_id"),
+                        payload.get("status") or "active",
+                        int(payload.get("version") or 1),
+                        payload.get("created_at") or _now_iso(),
+                        payload.get("updated_at") or _now_iso(),
+                        payload.get("last_modified_from") or "create",
+                        bool(payload.get("rag_indexed")),
+                    ),
+                )
+                imported += cur.rowcount
+    return imported
+
+
+from psycopg.rows import dict_row
+
+__all__ = [
+    "SourceRef",
+    "NoteMetadata",
+    "NoteRecord",
+    "NoteConflictError",
+    "create_note",
+    "get_note",
+    "update_note",
+    "list_notes",
+    "search_notes",
+    "note_filename_exists",
+    "import_legacy_notes_from_disk",
+]

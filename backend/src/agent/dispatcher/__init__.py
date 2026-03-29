@@ -1,6 +1,12 @@
 """
-Dispatcher Node.
+Dispatcher package exports.
 """
-from .node import dispatch
+
+
+def dispatch(*args, **kwargs):
+    from .node import dispatch as _dispatch
+
+    return _dispatch(*args, **kwargs)
+
 
 __all__ = ["dispatch"]

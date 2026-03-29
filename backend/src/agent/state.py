@@ -39,6 +39,13 @@ AGENT_OPERATIONS: tuple[AgentOperation, ...] = (
     "extract_points",
 )
 
+PendingClarification = Literal["none", "note_target", "edit_operation"]
+PENDING_CLARIFICATIONS: tuple[PendingClarification, ...] = (
+    "none",
+    "note_target",
+    "edit_operation",
+)
+
 
 class AgentState(MessagesState):
     """
@@ -53,12 +60,17 @@ class AgentState(MessagesState):
     extracted_data: Optional[list[ExtractedData]]
     active_note_id: Optional[str]
     active_note_title: Optional[str]
+    pending_clarification: PendingClarification
+    pending_question: Optional[str]
+    pending_context: Optional[dict[str, str]]
 
 
 __all__ = [
     "AGENT_MODES",
     "AGENT_OPERATIONS",
+    "PENDING_CLARIFICATIONS",
     "AgentMode",
     "AgentOperation",
+    "PendingClarification",
     "AgentState",
 ]

@@ -1,12 +1,11 @@
-﻿"""
+"""
 Defines the main workflow for the Note Agent.
 The architecture is: Dispatcher -> (if needed) ReAct Agent -> Export Session -> END
 
 When this graph runs under `langgraph dev` / LangGraph API, thread-scoped
 short-term memory is managed by the platform. PostgreSQL-backed persistence is
 enabled through the `POSTGRES_URI` environment variable, not through a custom
-application-level checkpointer. The JSON session export is only used by the
-frontend history APIs.
+application-level checkpointer. A PostgreSQL-backed session history projection table is used by the frontend history APIs.
 """
 import re
 import sys
@@ -328,3 +327,4 @@ def get_graph(xray: bool = False):
         graph_to_draw.nodes["react_agent"]["workflow"] = react_agent_graph
         return graph_to_draw
     return workflow
+

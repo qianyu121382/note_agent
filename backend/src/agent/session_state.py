@@ -1,9 +1,17 @@
-﻿"""Utilities for managing thread-scoped session state."""
+"""Utilities for managing thread-scoped session state."""
 from __future__ import annotations
 
+import re
 from typing import Any
 
-from agent.state import AGENT_MODES, AGENT_OPERATIONS, AgentMode, AgentOperation
+from agent.state import (
+    AGENT_MODES,
+    AGENT_OPERATIONS,
+    PENDING_CLARIFICATIONS,
+    AgentMode,
+    AgentOperation,
+    PendingClarification,
+)
 
 EDIT_KEYWORDS = {
     "modify",
@@ -27,6 +35,7 @@ EDIT_KEYWORDS = {
     "精简",
     "翻译",
     "完善",
+    "处理",
 }
 
 QA_KEYWORDS = {
@@ -81,6 +90,52 @@ NOTE_LOOKUP_KEYWORDS = {
     "哪篇",
 }
 
+AMBIGUOUS_NOTE_TARGET_KEYWORDS = {
+    "last note",
+    "previous note",
+    "that note",
+    "this note",
+    "上一篇",
+    "上一版",
+    "刚才那篇",
+    "刚刚那篇",
+    "这篇",
+    "那篇",
+}
+
+GENERIC_CLARIFICATION_FILLERS = (
+    "帮我",
+    "一下",
+    "这篇",
+    "那篇",
+    "上一篇",
+    "上一版",
+    "刚才那篇",
+    "刚刚那篇",
+    "笔记",
+    "note",
+    "notes",
+    "this note",
+    "that note",
+    "last note",
+    "previous note",
+    "modify",
+    "edit",
+    "update",
+    "rewrite",
+    "revise",
+    "translate",
+    "summary",
+    "summarize",
+    "解释",
+    "说明",
+    "修改",
+    "改",
+    "翻译",
+    "总结",
+    "处理",
+)
+
 OPERATION_KEYWORDS: dict[AgentOperation, set[str]] = {
     "locate_note": {
         "find note",
@@ -113,12 +168,16 @@ def normalize_mode(value: Any) -> AgentMode:
     return "idle"
 
 
-
 def normalize_operation(value: Any) -> AgentOperation:
     if isinstance(value, str) and value in AGENT_OPERATIONS:
         return value
     return "none"
 
+
+def normalize_pending_clarification(value: Any) -> PendingClarification:
+    if isinstance(value, str) and value in PENDING_CLARIFICATIONS:
+        return value
+    return "none"
 
 
 def _contains_any(user_input: str, keywords: set[str]) -> bool:
@@ -126,25 +185,37 @@ def _contains_any(user_input: str, keywords: set[str]) -> bool:
     return any(keyword in lowered for keyword in keywords)
 
 
+def _strip_generic_clarification_terms(user_input: str) -> str:
+    lowered = user_input.lower()
+    for filler in GENERIC_CLARIFICATION_FILLERS:
+        lowered = lowered.replace(filler, " ")
+    lowered = re.sub(r"[\s,，。.!！?？:：/\\-]+", " ", lowered)
+    return lowered.strip()
+
 
 def looks_like_edit_request(user_input: str) -> bool:
     return _contains_any(user_input, EDIT_KEYWORDS)
-
 
 
 def looks_like_qa_request(user_input: str) -> bool:
     return _contains_any(user_input, QA_KEYWORDS)
 
 
-
 def looks_like_note_reference(user_input: str) -> bool:
     return _contains_any(user_input, NOTE_REFERENCE_KEYWORDS)
-
 
 
 def looks_like_note_lookup_request(user_input: str) -> bool:
     return _contains_any(user_input, NOTE_LOOKUP_KEYWORDS)
 
+
+def looks_like_ambiguous_note_target(user_input: str) -> bool:
+    return _contains_any(user_input, AMBIGUOUS_NOTE_TARGET_KEYWORDS)
+
+
+def has_explicit_note_target_hint(user_input: str) -> bool:
+    cleaned = _strip_generic_clarification_terms(user_input)
+    return bool(re.search(r"[A-Za-z0-9\u4e00-\u9fff]{2,}", cleaned))
 
 
 def _match_operation_keyword(user_input: str) -> AgentOperation | None:
@@ -154,6 +225,42 @@ def _match_operation_keyword(user_input: str) -> AgentOperation | None:
             return operation
     return None
 
+
+def should_request_note_target_clarification(
+    *,
+    user_input: str,
+    has_active_note: bool,
+) -> bool:
+    if has_active_note:
+        return False
+    if not looks_like_ambiguous_note_target(user_input):
+        return False
+    return not has_explicit_note_target_hint(user_input)
+
+
+def should_request_edit_operation_clarification(
+    *,
+    user_input: str,
+    has_active_note: bool,
+    has_extracted_data: bool,
+) -> bool:
+    if not has_active_note or has_extracted_data:
+        return False
+    if not looks_like_edit_request(user_input):
+        return False
+
+    lowered = user_input.lower()
+    for operation in (
+        "expand_note",
+        "condense_note",
+        "translate_note",
+        "outline_note",
+        "rewrite_note",
+    ):
+        if any(keyword in lowered for keyword in OPERATION_KEYWORDS[operation]):
+            return False
+
+    return True
 
 
 def resolve_mode(
@@ -188,7 +295,6 @@ def resolve_mode(
         return resolved_current_mode
 
     return "create"
-
 
 
 def resolve_operation(
@@ -226,10 +332,15 @@ def resolve_operation(
 __all__ = [
     "normalize_mode",
     "normalize_operation",
+    "normalize_pending_clarification",
     "looks_like_edit_request",
     "looks_like_qa_request",
     "looks_like_note_reference",
     "looks_like_note_lookup_request",
+    "looks_like_ambiguous_note_target",
+    "has_explicit_note_target_hint",
+    "should_request_note_target_clarification",
+    "should_request_edit_operation_clarification",
     "resolve_mode",
     "resolve_operation",
 ]

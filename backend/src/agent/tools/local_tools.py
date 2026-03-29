@@ -18,13 +18,13 @@ from agent.tools.note_store import (
     create_note,
     get_note,
     list_notes,
+    note_filename_exists,
     search_notes,
     update_note,
 )
+from agent.tools.rag_store import retrieve_note_chunks
 
 # --- Constants ---
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-OUTPUT_DIR = PROJECT_ROOT / "data" / "notes"
 SKILLS_DIR = Path(__file__).resolve().parents[1] / "skills"
 SKILL_DESCRIPTIONS = {
     "create_note": "根据原始资料创建新笔记。适用于 URL、长文本、文件路径整理成 Markdown 笔记。",
@@ -156,7 +156,7 @@ def create_note_record(
     thread_id: str | None = None,
 ) -> str:
     """
-    Creates a new note record consisting of a Markdown file, note metadata JSON, and an index entry.
+    Creates a new note record in the PostgreSQL-backed note store.
     Use this tool when a brand-new note should be stored for later editing or retrieval.
     """
     if not note_content or not isinstance(note_content, str):
@@ -175,7 +175,7 @@ def create_note_record(
     )
     return (
         f"Successfully created note '{metadata.title}' with note_id '{metadata.note_id}'. "
-        f"Markdown saved to data/notes/{metadata.filename} and metadata saved to data/notes_meta/{metadata.note_id}.json."
+        f"The note is now stored in PostgreSQL with filename hint '{metadata.filename}'."
     )
 
 
@@ -221,7 +221,7 @@ def update_note_record(
     expected_version: int | None = None,
 ) -> str:
     """
-    Updates an existing stored note and bumps its metadata version.
+    Updates an existing stored note in PostgreSQL and bumps its metadata version.
     Use this tool when the user wants to revise, rewrite, expand, or otherwise modify an existing note.
     """
     if not note_content or not isinstance(note_content, str):
@@ -250,7 +250,7 @@ def update_note_record(
 
     return (
         f"Successfully updated note '{metadata.title}' with note_id '{metadata.note_id}'. "
-        f"Current version is {metadata.version}. Markdown path: data/notes/{metadata.filename}."
+        f"Current version is {metadata.version}. Stored filename hint: '{metadata.filename}'."
     )
 
 
@@ -261,7 +261,7 @@ class ListNotesInput(BaseModel):
 @tool(args_schema=ListNotesInput)
 def list_note_records(limit: int = 20) -> str:
     """
-    Lists stored notes from the notes index.
+    Lists stored notes from the PostgreSQL-backed note store.
     Use this tool when the user asks what notes exist or when the agent needs to choose a note to modify.
     """
     notes = list_notes(limit=limit)
@@ -302,14 +302,14 @@ def search_note_records(query: str, limit: int = 5) -> str:
 
 
 class CheckFilenameInput(BaseModel):
-    filename: str = Field(description="The filename to check for existence in the project's 'data/notes' directory. Example: 'my_meeting_summary.md'")
+    filename: str = Field(description="The filename to check for existence in the PostgreSQL-backed note store. Example: 'my_meeting_summary.md'")
 
 
 @tool(args_schema=CheckFilenameInput)
 def check_filename_exists(filename: str) -> str:
     """
-    Checks if a file with the given name already exists in the project's 'data/notes' directory.
-    Use this tool before manually writing a file with a fixed filename.
+    Checks if a filename hint is already present in the PostgreSQL-backed note store.
+    Use this tool before manually writing a note with a fixed filename hint.
     """
     sane_filename = re.sub(r"[^a-zA-Z0-9_.-]", "", filename)
     if sane_filename != filename or ".." in filename or "/" in filename or "\\" in filename:
@@ -318,10 +318,41 @@ def check_filename_exists(filename: str) -> str:
     if not sane_filename.endswith(".md"):
         sane_filename += ".md"
 
-    output_path = OUTPUT_DIR / sane_filename
-    if output_path.exists():
-        return f"Observation: Filename '{sane_filename}' already exists in data/notes."
-    return f"Observation: Filename '{sane_filename}' is available in data/notes."
+    if note_filename_exists(sane_filename):
+        return f"Observation: Filename '{sane_filename}' already exists in the note store."
+    return f"Observation: Filename '{sane_filename}' is available in the note store."
+
+
+class RetrieveChunksInput(BaseModel):
+    query: str = Field(description="The semantic query to search against indexed note chunks.")
+    note_id: str | None = Field(
+        default=None,
+        description="Optional note_id to restrict retrieval to a single active note.",
+    )
+    limit: int = Field(default=5, description="Maximum number of relevant chunks to return.")
+
+
+@tool(args_schema=RetrieveChunksInput)
+def retrieve_note_chunks_context(query: str, note_id: str | None = None, limit: int = 5) -> str:
+    """
+    Retrieves semantically relevant note chunks from the local Qdrant-backed RAG index.
+    Use this tool for note QA, especially when an active note exists and you need grounded context.
+    """
+    chunks = retrieve_note_chunks(query=query, note_id=note_id, limit=limit)
+    if not chunks:
+        if note_id:
+            return f"No indexed chunks were found for query '{query}' within note '{note_id}'."
+        return f"No indexed chunks were found for query '{query}'."
+
+    lines = [f"Relevant chunks for query '{query}':"]
+    for chunk in chunks:
+        lines.append(
+            f"- note_id: {chunk.note_id} | chunk_index: {chunk.chunk_index} | "
+            f"section: {chunk.section_title} | score: {chunk.score:.4f}"
+        )
+        lines.append(f"  source_ref: {chunk.source_ref or 'N/A'}")
+        lines.append(f"  content: {chunk.content}")
+    return "\n".join(lines)
 
 
 local_tools_list = [
@@ -335,4 +366,5 @@ local_tools_list = [
     list_note_records,
     search_note_records,
     check_filename_exists,
+    retrieve_note_chunks_context,
 ]

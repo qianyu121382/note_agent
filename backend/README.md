@@ -1,4 +1,4 @@
-﻿# Note Agent Backend
+# Note Agent Backend
 
 This directory contains the active LangGraph backend project.
 
@@ -10,8 +10,7 @@ This backend follows the standard LangGraph API pattern:
 - let `langgraph dev` manage thread persistence automatically
 - configure PostgreSQL with `POSTGRES_URI` in `.env`
 
-The JSON files under `data/sessions` are only a frontend-facing projection for
-session history display. They are not the primary short-term memory store.
+Session history is stored in PostgreSQL as a frontend-facing projection table. It is not the primary short-term memory store; LangGraph persistence remains the source of truth for thread state.
 
 ## Run Locally
 
@@ -44,3 +43,4 @@ Use these values in Agent Chat UI:
 - `data`: inputs and generated notes
 - `server_tmp`: server-side downloaded temporary files
 - `tests`: current test files
+
