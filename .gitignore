@@ -166,3 +166,5 @@ cython_debug/
 #.idea/
 .langgraph_api/
 backend/data/qdrant/
+
+MiniRAG
