@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, ChangeEvent } from "react";
 import { toast } from "sonner";
 import { ContentBlock } from "@langchain/core/messages";
-import { fileToContentBlock } from "@/lib/multimodal-utils";
+import { fileToContentBlock, normalizeUploadMimeType } from "@/lib/multimodal-utils";
 
 export const SUPPORTED_FILE_TYPES = [
   "image/jpeg",
@@ -9,6 +9,8 @@ export const SUPPORTED_FILE_TYPES = [
   "image/gif",
   "image/webp",
   "application/pdf",
+  "text/markdown",
+  "text/plain",
 ];
 
 interface UseFileUploadOptions {
@@ -25,20 +27,25 @@ export function useFileUpload({
   const dragCounter = useRef(0);
 
   const isDuplicate = (file: File, blocks: ContentBlock.Multimodal.Data[]) => {
-    if (file.type === "application/pdf") {
+    const mimeType = normalizeUploadMimeType(file);
+    if (
+      mimeType === "application/pdf" ||
+      mimeType === "text/markdown" ||
+      mimeType === "text/plain"
+    ) {
       return blocks.some(
         (b) =>
           b.type === "file" &&
-          b.mimeType === "application/pdf" &&
+          b.mimeType === mimeType &&
           b.metadata?.filename === file.name,
       );
     }
-    if (SUPPORTED_FILE_TYPES.includes(file.type)) {
+    if (SUPPORTED_FILE_TYPES.includes(mimeType)) {
       return blocks.some(
         (b) =>
           b.type === "image" &&
           b.metadata?.name === file.name &&
-          b.mimeType === file.type,
+          b.mimeType === mimeType,
       );
     }
     return false;
@@ -49,10 +56,10 @@ export function useFileUpload({
     if (!files) return;
     const fileArray = Array.from(files);
     const validFiles = fileArray.filter((file) =>
-      SUPPORTED_FILE_TYPES.includes(file.type),
+      SUPPORTED_FILE_TYPES.includes(normalizeUploadMimeType(file)),
     );
     const invalidFiles = fileArray.filter(
-      (file) => !SUPPORTED_FILE_TYPES.includes(file.type),
+      (file) => !SUPPORTED_FILE_TYPES.includes(normalizeUploadMimeType(file)),
     );
     const duplicateFiles = validFiles.filter((file) =>
       isDuplicate(file, contentBlocks),
@@ -63,7 +70,7 @@ export function useFileUpload({
 
     if (invalidFiles.length > 0) {
       toast.error(
-        "You have uploaded invalid file type. Please upload a JPEG, PNG, GIF, WEBP image or a PDF.",
+        "You have uploaded an invalid file type. Please upload an image, PDF, Markdown, or text file.",
       );
     }
     if (duplicateFiles.length > 0) {
@@ -109,10 +116,10 @@ export function useFileUpload({
 
       const files = Array.from(e.dataTransfer.files);
       const validFiles = files.filter((file) =>
-        SUPPORTED_FILE_TYPES.includes(file.type),
+        SUPPORTED_FILE_TYPES.includes(normalizeUploadMimeType(file)),
       );
       const invalidFiles = files.filter(
-        (file) => !SUPPORTED_FILE_TYPES.includes(file.type),
+        (file) => !SUPPORTED_FILE_TYPES.includes(normalizeUploadMimeType(file)),
       );
       const duplicateFiles = validFiles.filter((file) =>
         isDuplicate(file, contentBlocks),
@@ -123,7 +130,7 @@ export function useFileUpload({
 
       if (invalidFiles.length > 0) {
         toast.error(
-          "You have uploaded invalid file type. Please upload a JPEG, PNG, GIF, WEBP image or a PDF.",
+          "You have uploaded an invalid file type. Please upload an image, PDF, Markdown, or text file.",
         );
       }
       if (duplicateFiles.length > 0) {
@@ -215,26 +222,31 @@ export function useFileUpload({
     }
     e.preventDefault();
     const validFiles = files.filter((file) =>
-      SUPPORTED_FILE_TYPES.includes(file.type),
+      SUPPORTED_FILE_TYPES.includes(normalizeUploadMimeType(file)),
     );
     const invalidFiles = files.filter(
-      (file) => !SUPPORTED_FILE_TYPES.includes(file.type),
+      (file) => !SUPPORTED_FILE_TYPES.includes(normalizeUploadMimeType(file)),
     );
     const isDuplicate = (file: File) => {
-      if (file.type === "application/pdf") {
+      const mimeType = normalizeUploadMimeType(file);
+      if (
+        mimeType === "application/pdf" ||
+        mimeType === "text/markdown" ||
+        mimeType === "text/plain"
+      ) {
         return contentBlocks.some(
           (b) =>
             b.type === "file" &&
-            b.mimeType === "application/pdf" &&
+            b.mimeType === mimeType &&
             b.metadata?.filename === file.name,
         );
       }
-      if (SUPPORTED_FILE_TYPES.includes(file.type)) {
+      if (SUPPORTED_FILE_TYPES.includes(mimeType)) {
         return contentBlocks.some(
           (b) =>
             b.type === "image" &&
             b.metadata?.name === file.name &&
-            b.mimeType === file.type,
+            b.mimeType === mimeType,
         );
       }
       return false;
@@ -243,7 +255,7 @@ export function useFileUpload({
     const uniqueFiles = validFiles.filter((file) => !isDuplicate(file));
     if (invalidFiles.length > 0) {
       toast.error(
-        "You have pasted an invalid file type. Please paste a JPEG, PNG, GIF, WEBP image or a PDF.",
+        "You have pasted an invalid file type. Please paste an image, PDF, Markdown, or text file.",
       );
     }
     if (duplicateFiles.length > 0) {

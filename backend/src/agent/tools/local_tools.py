@@ -13,16 +13,9 @@ from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
 from agent.llm import llm
-from agent.tools.note_store import (
-    NoteConflictError,
-    create_note,
-    get_note,
-    list_notes,
-    note_filename_exists,
-    search_notes,
-    update_note,
-)
-from agent.tools.rag_store import retrieve_note_chunks
+from agent.rag import retrieve_chunks_for_baseline, search_notes_for_baseline
+from agent.services import get_note_service
+from agent.tools.note_store import NoteConflictError, note_filename_exists
 
 # --- Constants ---
 SKILLS_DIR = Path(__file__).resolve().parents[1] / "skills"
@@ -32,6 +25,8 @@ SKILL_DESCRIPTIONS = {
     "note_qa": "围绕已有笔记问答。适用于总结、解释、提炼重点和基于笔记回答问题。",
     "locate_note": "定位目标笔记。适用于新线程中先查找“刚才那篇”“RAG 那篇”“agent 那篇”等已有笔记。",
 }
+
+note_service = get_note_service()
 
 
 # --- Tool Definitions ---
@@ -164,7 +159,7 @@ def create_note_record(
     if not title or not isinstance(title, str):
         return "Error: title cannot be empty."
 
-    metadata = create_note(
+    metadata = note_service.create_note(
         title=title,
         content=note_content,
         summary=summary,
@@ -189,7 +184,7 @@ def read_note(note_id: str) -> str:
     Reads a stored note and its metadata by note_id.
     Use this tool before modifying a note or when the user asks about an existing note.
     """
-    record = get_note(note_id)
+    record = note_service.get_note(note_id)
     if record is None:
         return f"Error: Note with id '{note_id}' was not found."
 
@@ -228,7 +223,7 @@ def update_note_record(
         return "Error: note_content cannot be empty."
 
     try:
-        metadata = update_note(
+        metadata = note_service.update_note(
             note_id,
             content=note_content,
             title=title,
@@ -264,7 +259,7 @@ def list_note_records(limit: int = 20) -> str:
     Lists stored notes from the PostgreSQL-backed note store.
     Use this tool when the user asks what notes exist or when the agent needs to choose a note to modify.
     """
-    notes = list_notes(limit=limit)
+    notes = note_service.list_notes(limit=limit)
     if not notes:
         return "No stored notes were found."
 
@@ -275,6 +270,26 @@ def list_note_records(limit: int = 20) -> str:
             f"version: {note.get('version')} | updated_at: {note.get('updated_at')}"
         )
     return "Stored notes:\n" + "\n".join(lines)
+
+
+class DeleteNoteInput(BaseModel):
+    note_id: str = Field(description="The unique id of the note to delete.")
+
+
+@tool(args_schema=DeleteNoteInput)
+def delete_note_record(note_id: str) -> str:
+    """
+    Deletes an existing stored note and its derived RAG index.
+    Use this tool only when the user explicitly asks to delete or remove a note.
+    """
+    metadata = note_service.delete_note(note_id)
+    if metadata is None:
+        return f"Error: Note with id '{note_id}' was not found."
+
+    return (
+        f"Successfully deleted note '{metadata.title}' with note_id '{metadata.note_id}'. "
+        "Its PostgreSQL record and derived RAG index were removed."
+    )
 
 
 class SearchNotesInput(BaseModel):
@@ -288,7 +303,7 @@ def search_note_records(query: str, limit: int = 5) -> str:
     Searches stored notes by note_id, title, summary, and filename.
     Use this tool when the user refers to an existing note but the exact note_id is unknown.
     """
-    matches = search_notes(query=query, limit=limit)
+    matches = search_notes_for_baseline(query=query, limit=limit)
     if not matches:
         return f"No matching notes were found for query '{query}'."
 
@@ -336,12 +351,11 @@ class RetrieveChunksInput(BaseModel):
 def retrieve_note_chunks_context(query: str, note_id: str | None = None, limit: int = 5) -> str:
     """
     Retrieves semantically relevant note chunks from the local Qdrant-backed RAG index.
-    Use this tool for note QA, especially when an active note exists and you need grounded context.
+    Use this tool for note QA. Retrieval now always runs globally across all indexed chunks.
+    The note_id argument is accepted for backward compatibility but is ignored.
     """
-    chunks = retrieve_note_chunks(query=query, note_id=note_id, limit=limit)
+    chunks = retrieve_chunks_for_baseline(query=query, note_id=None, limit=limit)
     if not chunks:
-        if note_id:
-            return f"No indexed chunks were found for query '{query}' within note '{note_id}'."
         return f"No indexed chunks were found for query '{query}'."
 
     lines = [f"Relevant chunks for query '{query}':"]
@@ -364,6 +378,7 @@ local_tools_list = [
     read_note,
     update_note_record,
     list_note_records,
+    delete_note_record,
     search_note_records,
     check_filename_exists,
     retrieve_note_chunks_context,

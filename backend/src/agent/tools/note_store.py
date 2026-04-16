@@ -171,6 +171,10 @@ def _set_rag_indexed(note_id: str, rag_indexed: bool) -> None:
             )
 
 
+def set_note_rag_indexed(note_id: str, rag_indexed: bool) -> None:
+    _set_rag_indexed(note_id, rag_indexed)
+
+
 def list_notes(limit: int = 20) -> list[dict[str, Any]]:
     _ensure_table()
     with _connect() as conn:
@@ -308,21 +312,6 @@ def create_note(
                 ),
             )
 
-    try:
-        from agent.tools.rag_store import rebuild_note_rag_index
-
-        rebuild_note_rag_index(
-            note_id=metadata.note_id,
-            title=metadata.title,
-            content=content,
-            source_ref=metadata.source_ref,
-        )
-        metadata.rag_indexed = True
-        _set_rag_indexed(metadata.note_id, True)
-    except Exception as exc:
-        metadata.rag_indexed = False
-        _set_rag_indexed(metadata.note_id, False)
-        logger.warning("Failed to build RAG index for note '%s': %s", metadata.note_id, exc)
     return metadata
 
 
@@ -423,21 +412,22 @@ def update_note(
             )
         conn.commit()
 
-    try:
-        from agent.tools.rag_store import rebuild_note_rag_index
+    return metadata
 
-        rebuild_note_rag_index(
-            note_id=metadata.note_id,
-            title=metadata.title,
-            content=content,
-            source_ref=metadata.source_ref,
-        )
-        metadata.rag_indexed = True
-        _set_rag_indexed(metadata.note_id, True)
-    except Exception as exc:
-        metadata.rag_indexed = False
-        _set_rag_indexed(metadata.note_id, False)
-        logger.warning("Failed to rebuild RAG index for note '%s': %s", metadata.note_id, exc)
+
+def delete_note(note_id: str) -> Optional[NoteMetadata]:
+    _ensure_table()
+    with _connect(autocommit=False) as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(f"SELECT * FROM {TABLE_NAME} WHERE note_id = %s FOR UPDATE", (note_id,))
+            row = cur.fetchone()
+            if row is None:
+                conn.rollback()
+                return None
+
+            metadata = _row_to_metadata(dict(row))
+            cur.execute(f"DELETE FROM {TABLE_NAME} WHERE note_id = %s", (note_id,))
+        conn.commit()
     return metadata
 
 
@@ -512,8 +502,10 @@ __all__ = [
     "create_note",
     "get_note",
     "update_note",
+    "delete_note",
     "list_notes",
     "search_notes",
+    "set_note_rag_indexed",
     "note_filename_exists",
     "import_legacy_notes_from_disk",
 ]

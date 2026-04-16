@@ -13,7 +13,7 @@
 1. 先确定目标笔记。
 2. 如果当前上下文已有活动笔记，优先围绕它回答。
 3. 如果目标不明确，优先使用 `search_note_records` 搜索候选；必要时再用 `list_note_records` 看最近笔记。
-4. 优先使用 `retrieve_note_chunks_context` 检索相关笔记分块；如果没有召回结果，再使用 `read_note` 读取整篇笔记。
+4. 优先使用 `retrieve_note_chunks_context` 做全局分块检索；如果没有召回结果，再使用 `read_note` 读取整篇笔记。
 5. 基于检索到的分块或笔记内容回答问题；如果用户要求的是提纲、总结、要点，也按问答处理。
 
 执行约束：

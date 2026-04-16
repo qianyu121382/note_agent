@@ -35,7 +35,7 @@
 - `update_note_record`：更新已有笔记
 - `list_note_records`：列出已有笔记，帮助定位目标
 - `search_note_records`：按标题、摘要、note_id 等搜索已有笔记候选
-- `retrieve_note_chunks_context`：从本地 RAG 索引中检索相关笔记分块。做笔记问答时优先使用，尤其是在已有 `active_note_id` 时。
+- `retrieve_note_chunks_context`：从本地 RAG 索引中做全局分块检索。做笔记问答时优先使用。
 
 ## 任务分类提示
 - 新建笔记：用户提供 URL、文本、文件路径，要求整理、总结、做笔记

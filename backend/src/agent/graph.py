@@ -1,6 +1,6 @@
 """
 Defines the main workflow for the Note Agent.
-The architecture is: Dispatcher -> (if needed) ReAct Agent -> Export Session -> END
+The architecture is: Normalize Input -> Dispatcher -> (if needed) ReAct Agent -> Export Session -> END
 
 When this graph runs under `langgraph dev` / LangGraph API, thread-scoped
 short-term memory is managed by the platform. PostgreSQL-backed persistence is
@@ -20,6 +20,7 @@ from langgraph.graph import END, StateGraph
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent.dispatcher import dispatch
+from agent.input_normalizer import normalize_input_node
 from agent.react_agent.graph import base_prompt, react_agent_graph
 from agent.session_state import normalize_mode, normalize_operation
 from agent.session_store import export_session_snapshot
@@ -31,7 +32,6 @@ TITLE_RE = re.compile(r"note '([^']+)'")
 CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 
 
-
 def _extract_thread_id(config: RunnableConfig | None) -> Optional[str]:
     if not config:
         return None
@@ -40,7 +40,6 @@ def _extract_thread_id(config: RunnableConfig | None) -> Optional[str]:
         return None
     thread_id = configurable.get("thread_id")
     return str(thread_id) if thread_id else None
-
 
 
 def _get_latest_user_input(messages: List[BaseMessage]) -> str:
@@ -78,7 +77,6 @@ def _get_latest_user_input(messages: List[BaseMessage]) -> str:
     return ""
 
 
-
 def _get_conversation_history(messages: List[BaseMessage], latest_user_input: str) -> List[BaseMessage]:
     conversation_history = [
         message for message in messages if isinstance(message, (HumanMessage, AIMessage))
@@ -94,6 +92,53 @@ def _get_conversation_history(messages: List[BaseMessage], latest_user_input: st
     return conversation_history
 
 
+def _stringify_content_part(part: Any) -> str:
+    if isinstance(part, str):
+        return part
+    if not isinstance(part, dict):
+        return str(part)
+
+    part_type = part.get("type")
+    if part_type == "text":
+        return str(part.get("text", ""))
+    if part_type == "image":
+        metadata = part.get("metadata") if isinstance(part.get("metadata"), dict) else {}
+        name = str(metadata.get("name") or "")
+        return f"[Attached image{name and f': {name}' or ''}]"
+    if part_type == "file":
+        metadata = part.get("metadata") if isinstance(part.get("metadata"), dict) else {}
+        filename = str(metadata.get("filename") or metadata.get("name") or "")
+        mime_type = str(part.get("mimeType") or "file")
+        label = filename or mime_type
+        return f"[Attached file: {label}]"
+    return str(part)
+
+
+def _content_to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [_stringify_content_part(part).strip() for part in content]
+        return "\n".join(part for part in parts if part)
+    return str(content)
+
+
+def _sanitize_message_for_model(message: BaseMessage) -> BaseMessage:
+    text_content = _content_to_text(message.content).strip() or "(empty message)"
+    if isinstance(message, HumanMessage):
+        return HumanMessage(content=text_content)
+    if isinstance(message, AIMessage):
+        return AIMessage(content=text_content)
+    return message
+
+
+def _sanitize_conversation_history(messages: List[BaseMessage]) -> List[BaseMessage]:
+    return [
+        _sanitize_message_for_model(message)
+        for message in messages
+        if isinstance(message, (HumanMessage, AIMessage))
+    ]
+
 
 def _format_conversation_history(messages: List[BaseMessage]) -> str:
     if not messages:
@@ -108,11 +153,10 @@ def _format_conversation_history(messages: List[BaseMessage]) -> str:
         else:
             continue
 
-        content = message.content if isinstance(message.content, str) else str(message.content)
+        content = _content_to_text(message.content)
         lines.append(f"{role}: {content}")
 
     return "\n".join(lines) if lines else "(No prior conversation.)"
-
 
 
 def _extract_active_note_updates(messages: List[BaseMessage]) -> tuple[Optional[str], Optional[str]]:
@@ -138,10 +182,8 @@ def _extract_active_note_updates(messages: List[BaseMessage]) -> tuple[Optional[
     return active_note_id, active_note_title
 
 
-
 def _prefers_chinese(text: str) -> bool:
     return bool(CJK_RE.search(text or ""))
-
 
 
 def _build_missing_context_response(user_input: str) -> str:
@@ -151,7 +193,6 @@ def _build_missing_context_response(user_input: str) -> str:
         "I don't know which note you want to work on yet. "
         "Please provide source material or specify which existing note you want to modify."
     )
-
 
 
 def _can_proceed_without_active_note(extracted_data: list[Any], operation: str) -> bool:
@@ -164,7 +205,9 @@ async def run_react_agent_node(state: AgentState) -> dict[str, Any]:
     messages = state.get("messages", []) or []
     extracted_data = state.get("extracted_data", []) or []
     user_input = _get_latest_user_input(messages)
-    conversation_history = _get_conversation_history(messages, user_input)
+    conversation_history = _sanitize_conversation_history(
+        _get_conversation_history(messages, user_input)
+    )
     active_note_id = state.get("active_note_id")
     active_note_title = state.get("active_note_title")
     mode = normalize_mode(state.get("mode"))
@@ -268,7 +311,6 @@ async def run_react_agent_node(state: AgentState) -> dict[str, Any]:
     return result
 
 
-
 def export_session_node(state: AgentState, config: RunnableConfig | None = None) -> dict[str, Any]:
     thread_id = _extract_thread_id(config)
     if not thread_id:
@@ -289,7 +331,6 @@ def export_session_node(state: AgentState, config: RunnableConfig | None = None)
     return {}
 
 
-
 def route_after_dispatch(state: AgentState):
     intent = state.get("intent")
     if intent == "note_taking":
@@ -301,10 +342,12 @@ def route_after_dispatch(state: AgentState):
 
 
 workflow = StateGraph(AgentState)
+workflow.add_node("normalize_input", normalize_input_node)
 workflow.add_node("dispatch", dispatch)
 workflow.add_node("react_agent", run_react_agent_node)
 workflow.add_node("export_session", export_session_node)
-workflow.set_entry_point("dispatch")
+workflow.set_entry_point("normalize_input")
+workflow.add_edge("normalize_input", "dispatch")
 workflow.add_conditional_edges(
     "dispatch",
     route_after_dispatch,
@@ -320,11 +363,9 @@ graph = workflow.compile()
 graph.name = "Main Coordinator Agent (ReAct Architecture)"
 
 
-
 def get_graph(xray: bool = False):
     if xray:
         graph_to_draw = workflow.copy()
         graph_to_draw.nodes["react_agent"]["workflow"] = react_agent_graph
         return graph_to_draw
     return workflow
-

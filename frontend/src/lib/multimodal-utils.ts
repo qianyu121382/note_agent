@@ -1,7 +1,19 @@
 import { ContentBlock } from "@langchain/core/messages";
 import { toast } from "sonner";
 
-// Returns a Promise of a typed multimodal block for images or PDFs
+export function normalizeUploadMimeType(file: Pick<File, "type" | "name">): string {
+  if (file.type) {
+    return file.type;
+  }
+
+  const lowered = file.name.toLowerCase();
+  if (lowered.endsWith(".md")) return "text/markdown";
+  if (lowered.endsWith(".txt")) return "text/plain";
+  if (lowered.endsWith(".pdf")) return "application/pdf";
+  return "";
+}
+
+// Returns a Promise of a typed multimodal block for images or supported files.
 export async function fileToContentBlock(
   file: File,
 ): Promise<ContentBlock.Multimodal.Data> {
@@ -11,30 +23,37 @@ export async function fileToContentBlock(
     "image/gif",
     "image/webp",
   ];
-  const supportedFileTypes = [...supportedImageTypes, "application/pdf"];
+  const supportedFileTypes = [
+    ...supportedImageTypes,
+    "application/pdf",
+    "text/markdown",
+    "text/plain",
+  ];
 
-  if (!supportedFileTypes.includes(file.type)) {
+  const mimeType = normalizeUploadMimeType(file);
+
+  if (!supportedFileTypes.includes(mimeType)) {
     toast.error(
-      `Unsupported file type: ${file.type}. Supported types are: ${supportedFileTypes.join(", ")}`,
+      `Unsupported file type: ${mimeType || file.name}. Supported types are: ${supportedFileTypes.join(", ")}`,
     );
-    return Promise.reject(new Error(`Unsupported file type: ${file.type}`));
+    return Promise.reject(new Error(`Unsupported file type: ${mimeType || file.name}`));
   }
 
   const data = await fileToBase64(file);
 
-  if (supportedImageTypes.includes(file.type)) {
+  if (supportedImageTypes.includes(mimeType)) {
     return {
       type: "image",
-      mimeType: file.type,
+      mimeType,
       data,
       metadata: { name: file.name },
     };
   }
 
-  // PDF
+  // Generic file block for PDF / markdown / text
   return {
     type: "file",
-    mimeType: "application/pdf",
+    mimeType,
     data,
     metadata: { filename: file.name },
   };
@@ -66,7 +85,9 @@ export function isBase64ContentBlock(
     "mimeType" in block &&
     typeof (block as { mimeType?: unknown }).mimeType === "string" &&
     ((block as { mimeType: string }).mimeType.startsWith("image/") ||
-      (block as { mimeType: string }).mimeType === "application/pdf")
+      ["application/pdf", "text/markdown", "text/plain"].includes(
+        (block as { mimeType: string }).mimeType,
+      ))
   ) {
     return true;
   }

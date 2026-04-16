@@ -1,3 +1,4 @@
+
 """Dispatcher Node."""
 from typing import Any, Dict
 
@@ -304,6 +305,7 @@ def dispatch(state: Dict[str, Any]) -> Dict[str, Any]:
     """Analyze the user input, determine intent, and extract useful content."""
     logger.info("--- Node: Dispatcher ---")
     user_input = _extract_user_input(state)
+    seeded_extracted_data = state.get("extracted_data") or []
     current_mode = normalize_mode(state.get("mode"))
     current_operation = normalize_operation(state.get("operation"))
     pending_clarification = normalize_pending_clarification(state.get("pending_clarification"))
@@ -311,12 +313,23 @@ def dispatch(state: Dict[str, Any]) -> Dict[str, Any]:
     pending_context = state.get("pending_context")
 
     if not user_input:
+        if seeded_extracted_data:
+            logger.info("No text input found, but normalized file input exists. Routing to note_taking/create.")
+            return {
+                "intent": "note_taking",
+                "mode": "create",
+                "operation": "create_note",
+                "extracted_data": seeded_extracted_data,
+                "pending_clarification": "none",
+                "pending_question": None,
+                "pending_context": None,
+            }
         logger.warning("User input is empty.")
         return {
             "intent": "waiting",
             "mode": current_mode,
             "operation": current_operation,
-            "extracted_data": [],
+            "extracted_data": seeded_extracted_data,
             "pending_clarification": pending_clarification,
             "pending_question": pending_question,
             "pending_context": pending_context,
@@ -335,6 +348,19 @@ def dispatch(state: Dict[str, Any]) -> Dict[str, Any]:
             return clarification_result
 
     active_note_id = state.get("active_note_id")
+
+    if seeded_extracted_data:
+        logger.info("Detected normalized uploaded file input. Routing directly to note_taking/create.")
+        return {
+            "intent": "note_taking",
+            "mode": "create",
+            "operation": "create_note",
+            "extracted_data": seeded_extracted_data,
+            "pending_clarification": "none",
+            "pending_question": None,
+            "pending_context": None,
+        }
+
     existing_note_route = _route_existing_note_request(
         user_input=user_input,
         active_note_id=active_note_id,
@@ -349,8 +375,10 @@ def dispatch(state: Dict[str, Any]) -> Dict[str, Any]:
     if response.intent == "waiting":
         logger.debug(f"LLM generated response for user: '{response.response_to_user}'")
 
-    if response.data:
-        for item in response.data:
+    combined_extracted_data = [*seeded_extracted_data, *(response.data or [])]
+
+    if combined_extracted_data:
+        for item in combined_extracted_data:
             logger.debug(f"Extracted data: type='{item.type}', content='{item.content[:100]}...'")
 
     mode = resolve_mode(
@@ -358,21 +386,21 @@ def dispatch(state: Dict[str, Any]) -> Dict[str, Any]:
         intent=response.intent,
         user_input=user_input,
         has_active_note=bool(active_note_id),
-        has_extracted_data=bool(response.data),
+        has_extracted_data=bool(combined_extracted_data),
     )
     operation = resolve_operation(
         current_operation=current_operation,
         mode=mode,
         intent=response.intent,
         user_input=user_input,
-        has_extracted_data=bool(response.data),
+        has_extracted_data=bool(combined_extracted_data),
         llm_operation=response.operation,
     )
 
     clarification_request = _maybe_request_clarification(
         user_input=user_input,
         active_note_id=active_note_id,
-        has_extracted_data=bool(response.data),
+        has_extracted_data=bool(combined_extracted_data),
         mode=mode,
         operation=operation,
     )
@@ -387,7 +415,7 @@ def dispatch(state: Dict[str, Any]) -> Dict[str, Any]:
         "intent": response.intent,
         "mode": mode,
         "operation": operation,
-        "extracted_data": response.data,
+        "extracted_data": combined_extracted_data,
         "pending_clarification": "none",
         "pending_question": None,
         "pending_context": None,
