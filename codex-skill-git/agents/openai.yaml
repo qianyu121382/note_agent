@@ -1,0 +1,7 @@
+interface:
+  display_name: "Git"
+  short_description: "Summarize, commit, and push today's work"
+  default_prompt: "Use $git to summarize today's repository work, create a commit, and push the current branch."
+policy:
+  allow_implicit_invocation: false
+
